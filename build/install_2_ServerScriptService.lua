@@ -107,6 +107,24 @@ DataService.Start()
 ]=])
 count += 1
 local folder1 = ensure(root, "Folder", "Services")
+setSource(folder1, "ModuleScript", "AdminConfig", [=[
+--!strict
+-- Server-only list of admin user ids for the live-ops panel. Numeric ids only:
+-- usernames can change and be re-registered by someone else.
+
+local AdminConfig = {
+	UserIds = {
+		1403634211,
+	},
+}
+
+function AdminConfig.IsAdmin(player: Player): boolean
+	return table.find(AdminConfig.UserIds, player.UserId) ~= nil
+end
+
+return AdminConfig
+]=])
+count += 1
 setSource(folder1, "ModuleScript", "AnnounceService", [=[
 --!strict
 -- Player notices (toasts) and server-wide announcement banners.

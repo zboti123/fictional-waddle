@@ -94,6 +94,27 @@ DataService.Start()
 		</Properties>
 		<Item class="ModuleScript" referent="RBX16">
 			<Properties>
+				<string name="Name">AdminConfig</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Server-only list of admin user ids for the live-ops panel. Numeric ids only:
+-- usernames can change and be re-registered by someone else.
+
+local AdminConfig = {
+	UserIds = {
+		1403634211,
+	},
+}
+
+function AdminConfig.IsAdmin(player: Player): boolean
+	return table.find(AdminConfig.UserIds, player.UserId) ~= nil
+end
+
+return AdminConfig
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX17">
+			<Properties>
 				<string name="Name">AnnounceService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
 -- Player notices (toasts) and server-wide announcement banners.
@@ -144,7 +165,7 @@ return AnnounceService
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX17">
+		<Item class="ModuleScript" referent="RBX18">
 			<Properties>
 				<string name="Name">ConfigValidator</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -248,7 +269,7 @@ return ConfigValidator
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX18">
+		<Item class="ModuleScript" referent="RBX19">
 			<Properties>
 				<string name="Name">DataService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -323,7 +344,7 @@ return DataService
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX19">
+		<Item class="ModuleScript" referent="RBX20">
 			<Properties>
 				<string name="Name">DataTemplate</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -369,7 +390,7 @@ return DataTemplate
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX20">
+		<Item class="ModuleScript" referent="RBX21">
 			<Properties>
 				<string name="Name">DragonService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -584,7 +605,7 @@ return DragonService
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX21">
+		<Item class="ModuleScript" referent="RBX22">
 			<Properties>
 				<string name="Name">EconomyService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -679,7 +700,7 @@ return EconomyService
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX22">
+		<Item class="ModuleScript" referent="RBX23">
 			<Properties>
 				<string name="Name">EruptionService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -893,7 +914,7 @@ return EruptionService
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX23">
+		<Item class="ModuleScript" referent="RBX24">
 			<Properties>
 				<string name="Name">HatchRoller</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -981,7 +1002,7 @@ return HatchRoller
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX24">
+		<Item class="ModuleScript" referent="RBX25">
 			<Properties>
 				<string name="Name">HatchService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -1073,7 +1094,7 @@ return HatchService
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX25">
+		<Item class="ModuleScript" referent="RBX26">
 			<Properties>
 				<string name="Name">IncubationService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -1291,7 +1312,7 @@ return IncubationService
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX26">
+		<Item class="ModuleScript" referent="RBX27">
 			<Properties>
 				<string name="Name">NestService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -1380,7 +1401,7 @@ return NestService
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX27">
+		<Item class="ModuleScript" referent="RBX28">
 			<Properties>
 				<string name="Name">PlotService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -1701,7 +1722,7 @@ return PlotService
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX28">
+		<Item class="ModuleScript" referent="RBX29">
 			<Properties>
 				<string name="Name">ProductionService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -1815,7 +1836,7 @@ return ProductionService
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX29">
+		<Item class="ModuleScript" referent="RBX30">
 			<Properties>
 				<string name="Name">RateLimiter</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -1881,7 +1902,7 @@ return RateLimiter
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX30">
+		<Item class="ModuleScript" referent="RBX31">
 			<Properties>
 				<string name="Name">ShopService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -1960,7 +1981,7 @@ return ShopService
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX31">
+		<Item class="ModuleScript" referent="RBX32">
 			<Properties>
 				<string name="Name">StateSync</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -2011,7 +2032,7 @@ return StateSync
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX32">
+		<Item class="ModuleScript" referent="RBX33">
 			<Properties>
 				<string name="Name">Validate</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
@@ -2056,7 +2077,7 @@ return Validate
 ]]></ProtectedString>
 			</Properties>
 		</Item>
-		<Item class="ModuleScript" referent="RBX33">
+		<Item class="ModuleScript" referent="RBX34">
 			<Properties>
 				<string name="Name">WorldService</string>
 				<ProtectedString name="Source"><![CDATA[--!strict
