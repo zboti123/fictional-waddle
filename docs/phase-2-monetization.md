@@ -18,48 +18,54 @@ Jelölések: **[T]** tény · **[B]** becslés · **[J]** javaslat · **[E]** el
 
 ---
 
-## 1. Game Passok (egyszeri, permanens)
+## 1. Game Passok (egyszeri, permanens), v2: ambiciózus létra
 
-| Pass | Ár (R$) | Mit ad | Miért ennyi |
+**Logika [J]:** egy olcsó belépő marad (az *első* fizetés a legnehezebb konverzió). A fő értéket a 399–699 sávba toltam, és két prémium „horgonyt” tettem a tetejére. A horgony a középső passokat olcsónak mutatja, és megfogja a sokat költőket.
+
+| Pass | Ár (R$) | Mit ad | Szerep |
 |---|---|---|---|
-| ⚡ Quick Hatch | 49 | A tojás-koppintás −2 mp (alapból −1) | Belépő impulzusvásárlás. A legnehezebb lépés az *első* fizetés. |
-| 🎒 Dragon Storage+ | 99 | +60 tárhely, auto-sell Common kapcsoló | Akkor kell, amikor betelik a tárhely (természetes súrlódási pont) |
-| 💎 2× Gems | 249 | ×2 💎 termelés | A fő érték-pass. A sim-műfajban ez a referencia-ár sáv **[B]**. |
-| 👑 VIP | 299 | +10% 💎, offline limit 4 → 8 óra, VIP lounge a vulkán peremén, chat-tag, arany névtábla | Státusz + kényelem, a többiek láthatják |
-| 🍀 Lucky Nest | 399 | ×1.25 súly a Rare+ ritkaságokra (újranormalizálva, az UI-ban kiírva) | **Policy-kapus.** Korlátozott régióban nem jelenik meg. |
-| 🪺 +3 Nest Slots | 499 | +3 fészekhely, +1 pihenő | Hosszú távú termelés, a 3–4. hét körüli elköteleződéshez |
-| 🤖 Dragon Keeper | 799 | Auto-collect + a tárolt tojásokat automatikusan lerakja az üres helyre | Bálna/grinder szint. Kényelem, nem erő. |
+| ⚡ Quick Hatch | 49 | Tojás-koppintás −2 mp (alap −1) | **Belépő**: az első vásárlás |
+| 🎒 Dragon Storage+ | 149 | +60 tárhely, auto-sell Common | Súrlódás-oldó (betelt tárhely) |
+| 👑 VIP | 399 | +15% 💎, offline limit 4 → 8 óra, VIP lounge, chat-tag, arany névtábla | Státusz, a többiek látják |
+| 💎 2× Gems | 449 | ×2 💎 termelés | **Fő érték-pass** |
+| 🍀 Lucky Nest | 599 | ×1.25 súly a Rare+ ritkaságokra (újranormalizálva, kiírva) | Policy-kapus |
+| 🪺 +3 Nest Slots | 699 | +3 fészekhely, +1 pihenő | Hosszú távú termelés |
+| 🤖 Dragon Keeper | 999 | Auto-collect + auto-lerakás a tárolt tojásokból | Kényelem a grindereknek |
+| 🌈 **Mythic Hunter** | 1 999 | ×1.5 Mythic-súly, Rainbow-aura a sárkányaidon, egyedi kitörés-hang a bejelentésnél | **Horgony 1**: státusz + szerencse, policy-kapus |
+| 🐉 **Dragon Lord** | 3 499 | Minden fenti pass hatása + egyedi „Dragon Lord” cím. A már megvett passok árát a bolt **kiírja**: „you already own 3 of 8 perks”. | **Horgony 2**: bundle a bálnáknak, policy-kapus elemekkel régiónként csökkentve |
 
-A létra 49 → 799 R$. Az olcsó belépő után a középső sávban (249–499) van a fő érték, a teteje pedig a kényelem a sokat játszóknak.
+**Kockázat [B]:** a magasabb árak 15–30%-kal csökkenthetik a pass-konverziót, de az ARPPU-t várhatóan jobban emelik. **A 2× Gems és a VIP árát A/B-teszteld** (449 vs 299, 399 vs 249). Két szerver-cohort, 2 hét, a fizetőnkénti bevétel alapján dönts. Az A/B-teszt keretét a Phase 3 analytics mérföldkövében építjük be.
 
 ---
 
-## 2. Developer Productok (ismételhető)
+## 2. Developer Productok (ismételhető), v2
 
 ### 2.1 💎 Gem packok (bevétel-arányos, policy-kapus)
-A mennyiség = a játékos **aktuális** 💎/mp bevétele × perc, minimum 500 💎. Így a pack értéke a 30. szinten sem lesz nevetséges.
+A mennyiség = a játékos **aktuális** 💎/mp bevétele × perc, minimum 500 💎.
 
-| Ár (R$) | Bevétel-percek | Bónusz a 49 R$-hez képest |
-|---|---|---|
-| 49 | 20 perc | — |
-| 99 | 45 perc | ~+11% |
-| 199 | 100 perc | ~+23% |
-| 499 | 280 perc | ~+37% |
-| 999 | 600 perc | ~+47% |
+| Ár (R$) | Bevétel-percek | Bónusz a 49 R$-hez képest | Címke |
+|---|---|---|---|
+| 49 | 20 perc | — | |
+| 149 | 70 perc | ~+15% | |
+| 399 | 210 perc | ~+29% | **Most popular** (valóban a leggyakoribb? Az analytics alapján frissítjük, addig nincs címke) |
+| 999 | 600 perc | ~+47% | |
+| 2 499 | 1 800 perc | ~+76% | **Best value** (matematikailag igaz) |
+
+**Szabály:** a „Most popular” címke csak valós adat alapján kerülhet ki. Hamis címke sötét minta.
 
 ### 2.2 Időzítő-, szerencse- és eseménytermékek
 
 | Termék | Ár (R$) | Hatás | Policy-kapus? |
 |---|---|---|---|
-| ⏩ Instant Hatch | 19 / 49 / 99 | Azonnal kikelti a tojást (hátralévő idő: <10 perc / <1 óra / <4 óra) | Igen |
-| 🔄 Instant Restock (saját) | 29 | Feltölti a saját bolti készletet | Igen |
-| 🍀 Luck Boost 15 perc | 99 | ×2 Rare+ súly magadnak | Igen |
-| 🌟 **Server Luck** 15 perc | 299 | ×1.5 Rare+ súly **mindenkinek** a szerveren. Banner: „Alex activated SERVER LUCK!” | Igen |
-| 🌋 **Trigger Eruption** | 199 | Azonnali kitörés a szerveren mindenkinek. Szerverenként 10 perc cooldown, a vásárlások sorba állnak. | Igen |
-| 🎁 **Starter Pack** (egyszeri) | 99 | Fix tartalom, **nincs benne véletlen**: *Baby Lava Dragon* (Rare, Lava-szint) + 30 perc 2× 💎 + 200 🔥. Érték-cél ≥5× az árhoz képest **[B]**. | Nem (fix tartalom) |
-
-- **Revive/second chance:** a játékban nincs bukás-állapot, ezért **nincs ilyen termék**. Kitalálni sem fogok, mert fölösleges nyomás lenne.
-- **A Server Luck és a Trigger Eruption marketing is:** mindenki látja, ki vette, és mindenki profitál belőle.
+| ⏩ Instant Hatch | 25 / 59 / 129 / 249 | Azonnali kelés (hátralévő idő: <10 perc / <1 óra / <4 óra / <12 óra) | Igen |
+| ⏩ Hatch All | a fenti árak összege −20% | Az összes tojás azonnal | Igen |
+| 🔄 Instant Restock (saját) | 49 | Feltölti a saját bolti készletet | Igen |
+| 🍀 Luck Boost | 99 (15 perc ×2) / 249 (1 óra ×2) / 599 (3 óra ×3) | Saját Rare+ súly | Igen |
+| 🌟 **Server Luck** | 399 (15 perc ×1.5) / 999 (30 perc ×3) | **Mindenkinek** a szerveren, név szerinti bannerrel | Igen |
+| 🌋 **Trigger Eruption** | 249 | Azonnali kitörés mindenkinek (szerver-cooldown 10 perc, sorba áll) | Igen |
+| 🌋💥 **Mega Eruption** | 999 | Dupla vadtojás, ×2 Rainbow-esély mindenkinek, 3 perc | Igen |
+| 🎁 **Starter Pack** (egyszeri) | 99 | Fix: *Baby Lava Dragon* (Rare) + 30 perc 2× 💎 + 200 🔥. Érték-cél ≥5× **[B]** | Nem (fix tartalom) |
+| 🎁 **Rebirth Pack** (egyszeri) | 399 | Fix: *Obsidian Guardian* (Epic) + 1 óra 2× 💎 + 500 🔥. Az első rebirth után jelenik meg. | Nem (fix tartalom) |
 
 ---
 
@@ -67,41 +73,44 @@ A mennyiség = a játékos **aktuális** 💎/mp bevétele × perc, minimum 500 
 
 | Forrás | Terv | Megjegyzés |
 |---|---|---|
-| Premium Payouts | Premium tagnak +10% 💎, napi Premium-láda (50 🔥), Premium jelvény. Időt jutalmaz, nem pénzt. | **[E]** A kifizetési modell és a Premium-előnyök szabályai. A bevétel a Premium-tagok játékidejétől függ **[T/E]**. |
-| Experience Subscription | „Dragon Keeper Club” havidíjas: napi 50 🔥, havi exkluzív skin, +2 óra offline limit | **[J]** Csak a W6 után, ha a D7 retenció jó. **[E]** Elérhetőség, ársávok, jogosultság. |
-| Rewarded video ads | Opt-in gomb az offline-bevétel begyűjtésénél: „Watch ad → ×2 offline”, napi max. 3 | **[E]** Elérhetőség, korhatár és régiók. Ha nem elérhető, a gomb nem jelenik meg. |
-| Privát szerver | 99 R$/hó | A grinderek és a tartalomgyártók miatt fontos. A YouTubereknek ingyen adunk (Phase 4). |
-| UGC (később) | Achievement-hez kötött UGC kiegészítő (pl. Rainbow-sárkány vállpet) | **[E]** UGC program jogosultság. Legkorábban a W8 után. |
+| Premium Payouts | Premium tagnak +10% 💎, napi Premium-láda (50 🔥), Premium-jelvény | **[E]** A kifizetési modell és a Premium-előnyök szabályai |
+| Experience Subscription | „Dragon Keeper Club” havidíjas: napi 75 🔥, havi exkluzív skin, +2 óra offline limit, havi 1 ingyenes Server Luck | **[J]** A W6 után. **[E]** Elérhetőség, ársávok. |
+| Rewarded video ads | Opt-in: „Watch ad → ×2 offline”, napi max. 3 | **[E]** Elérhetőség, korhatár |
+| Privát szerver | 149 R$/hó | A tartalomgyártók ingyen kapják (Phase 4) |
+| UGC (később) | Achievement-hez kötött vállpet | **[E]** UGC program |
 
 ---
 
-## 4. Elhelyezési térkép
+## 4. Elhelyezési térkép, v2 (konverzió-optimalizált)
 
-**Szabály:** munkamenetenként **max. 1 nem a játékos által indított popup**. Ez a Starter Pack, egyszer, az első Rare+ kelés után. Bezárható, **nincs hamis visszaszámláló**, és utána is mindig elérhető a boltban.
+**Szabály változatlan:** munkamenetenként **max. 1 kéretlen popup**. A többi ajánlat **kontextuális, inline**, és mindig a játékos mozdulatára vagy egy valós játékhelyzetre reagál.
 
-| Ajánlat | Hol | Mikor | Kéretlen popup? |
+| Ajánlat | Hol | Kiváltó pillanat | Miért konvertál |
 |---|---|---|---|
-| Starter Pack | Középre ugró kártya, utána a Store fül teteje | Az első Rare+ kelés után (pozitív pillanat), játékosonként egyszer | **Igen (az egyetlen)** |
-| Gem packok | „+” gomb a 💎 számláló mellett. Ha nincs elég 💎, a bolti gomb mellett egy „Get more” link. | A játékos kattint | Nem |
-| Instant Hatch | A tojás időzítő-buborékában „⚡ 49” gomb | Ha a játékos a tojásra koppint | Nem |
-| Luck Boost / Lucky Nest | A tojásbolt panel alján, a boostolt esélyek előnézetével | A bolt megnyitásakor (nem popup) | Nem |
-| Server Luck / Trigger Eruption | Kioszk a vulkán tetején + a „Next eruption 8:20” banneren egy kis gomb | Mindig ott van | Nem |
-| Dragon Storage+ | A „Storage full” értesítésben egy gomb | Amikor betelik a tárhely (valós súrlódás) | Nem (inline) |
-| +3 Nest Slots | Az üres, lakatos fészekhelyre koppintva | A játékos kattint | Nem |
-| VIP | A VIP lounge ajtaja a mapon + a Store | Mindig | Nem |
-| Dragon Keeper | Store + a gyűjtés gomb mellett egy kis 🤖 ikon | 20+ perc játékidő után jelenik meg | Nem |
-| Rewarded ad | Az offline-bevétel begyűjtő kártyáján | Visszatéréskor | Nem |
+| Starter Pack | Középső kártya (az egyetlen popup), utána a Store teteje | Az első Rare+ kelés után | Érzelmi csúcs, magas érték |
+| Rebirth Pack | Inline kártya a rebirth-képernyőn | Az első rebirth után | Új körnél újra kell építkezni, itt nő a fizetési hajlandóság |
+| Gem pack, **hiány-alapú** | „Get more” gomb a megvehetetlen tételnél, **a hiányt fedező legkisebb packot** ajánlja | A játékos rányom egy megfizethetetlen tojásra vagy fejlesztésre | Konkrét cél, pontos összeg |
+| Instant Hatch | „⚡” gomb az időzítő-buborékban, + **„Hatch now for the eruption bonus!”**, ha kitörés van és a tojás >1 percre van | A játékos a tojásra koppint, vagy kitörés zajlik | Valós időkényszer (a kitörés tényleg véget ér) |
+| Luck / Lucky Nest / Mythic Hunter | A tojásbolt alján, **a boostolt esélyek élő előnézetével** | Bolt-megnyitás | Átlátható, a fizetés hatása látszik |
+| Server Luck / Trigger / Mega Eruption | Vulkán-kioszk + a kitörés-visszaszámláló banner gombja + a kitörés vége után 10 mp-ig: „Start the next one for everyone” | A kitörés vége (közösségi érzelmi csúcs) | Közösségi hős-szerep, mindenki látja |
+| „Server Heroes” tábla | Fizikai tábla a vulkán mellett a mai Server Luck/Eruption vásárlók neveivel | Folyamatos | Társas bizonyíték (social proof), ingyenes marketing |
+| Dragon Storage+ | Inline gomb a „Storage full” értesítésben | Betelt tárhely | Valódi súrlódás |
+| +3 Nest Slots | Az üres, lakatos fészekhelyre koppintva | Mind a 7 gem-slot megvan | Természetes plafon |
+| VIP | A lounge ajtaja a mapon; a VIP-ek arany névtáblát kapnak | Folyamatos | Látható státusz |
+| 2× Gems | A 💎/mp kijelző mellett egy kis „×2?” jelvény (a játékos rákoppint) | Folyamatos | A fő számhoz kötve |
+| Dragon Keeper | A gyűjtés gombnál egy 🤖 ikon | 20+ perc játékidő után | A grinder fájdalompontja |
+| Dragon Lord | A Store „Passes” fül teteje, a már megvett perkek kiírásával | Legalább 2 pass megvétele után kiemelve | Horgony + bundle |
+| Rewarded ad | Az offline-bevétel kártyáján | Visszatéréskor | Ingyenes a játékosnak |
 
-**Visszajelzés a promptra [J]:** a „near-miss után ajánlj” mintát **nem** javaslom. Gyerekeknél a mesterséges near-miss kijelzés („majdnem Legendary lett!”) szerencsejáték-pszichológia. Ez etikailag és policy-szempontból is kockázatos. Helyette valódi pozitív pillanatokban ajánlunk (első ritka kelés, betelt tárhely).
+**Visszajelzés a promptra [J]:** a „near-miss után ajánlj” mintát **nem** építem be. Gyerekeknél a mesterséges „majdnem Legendary lett!” kijelzés szerencsejáték-pszichológia, ami policy- és hírnév-kockázat. A fenti valós pillanatok ugyanezt az érzelmi csúcsot fogják meg, manipuláció nélkül.
 
 ### Tiltott sötét minták (kódszinten is betartva)
-- Nincs hamis időkorlát, és nincs „csak most” ár, ami nem igaz.
-- Az ár mindig R$-ben és egyértelműen látszik, nincs köztes „gyémánt-a-gyémántért” trükk Robux-termékeknél.
+- Nincs hamis időkorlát, „csak most” ár vagy hamis „Most popular” címke.
+- Az ár mindig R$-ben látszik, köztes valuta-trükk nélkül.
 - Nincs „mindent elveszítesz” nyomás, és nincs vásárlásra kényszerítő blokkolás.
 - Az esélyek a vásárlás **előtt** látszanak, a boostok hatásával együtt.
 
 ---
-
 ## 5. `ProcessReceipt`: idempotens, mentés-előbb
 
 Ez a modul a Phase 3 fájlstruktúrájába kerül (`src/server/Services/ReceiptService.luau`), ProfileStore-ral.
@@ -303,20 +312,19 @@ return MonetizationPolicy
 
 ---
 
-## 6. Bevételi becslés **[B]** (nem garancia)
+## 6. Bevételi becslés **[B]** (nem garancia), v2 árakkal
 
 **Feltevések:**
-- Napi fizető-konverzió 0.5–2% a DAU-ból (középérték 1%).
-- ARPPU fizető naponként 150–400 R$ (középérték 250 R$).
+- Napi fizető-konverzió 0.4–1.8% (középérték 0.9%; a magasabb árak miatt kicsit alacsonyabb).
+- ARPPU fizető naponként 200–600 R$ (középérték 350 R$).
 - A fejlesztőhöz a Robux-költés ~70%-a jut **[E]**.
-- DevEx árfolyam ~0.0038 USD/R$ **[E: aktuális DevEx ráta]**.
+- DevEx árfolyam ~0.0038 USD/R$ **[E]**.
 
 | Mutató | Alacsony | Közép | Magas |
 |---|---|---|---|
-| ARPDAU (R$, bruttó elköltve) | 0.75 | 2.5 | 8 |
-| ARPDAU (R$, fejlesztőnek) | 0.53 | 1.75 | 5.6 |
-| ARPDAU (USD, DevEx után) | ~$0.002 | ~$0.0067 | ~$0.021 |
-| 1 000 DAU, havi USD | ~$60 | ~$200 | ~$640 |
-| 10 000 DAU, havi USD | ~$600 | ~$2 000 | ~$6 400 |
+| ARPDAU (R$, bruttó) | 0.8 | 3.15 | 10.8 |
+| ARPDAU (USD, DevEx után) | ~$0.0021 | ~$0.0084 | ~$0.029 |
+| 1 000 DAU, havi USD | ~$65 | ~$250 | ~$860 |
+| 10 000 DAU, havi USD | ~$650 | ~$2 500 | ~$8 600 |
 
-Ebben nincsenek benne a Premium Payouts és a privát szerverek. **Következtetés:** a bevételt a DAU skálázza, nem a monetizáció finomhangolása. Ezért retenció > viralitás > monetizáció.
+A v1-hez képest a középérték ~+25% **[B]**. Ez csak akkor igaz, ha a konverzió nem esik a feltételezettnél jobban, ezt az A/B-teszt dönti el. Ebben nincsenek benne a Premium Payouts, a privát szerverek és az előfizetés. **Következtetés változatlan:** a bevételt a DAU skálázza, ezért a retenció az első.

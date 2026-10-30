@@ -1,0 +1,1439 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+	<Item class="Folder" referent="RBX34">
+		<Properties>
+			<string name="Name">Client</string>
+		</Properties>
+		<Item class="ModuleScript" referent="RBX35">
+			<Properties>
+				<string name="Name">ClientState</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Latest server snapshot for the UI. Display only: the client never decides
+-- balances, prices or results.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Types = require(Shared:WaitForChild("Types"))
+local Remotes = require(Shared:WaitForChild("Remotes"))
+
+type Listener = (Types.Snapshot) -> ()
+
+local ClientState = {}
+
+local snapshot: Types.Snapshot? = nil
+local listeners: { Listener } = {}
+
+function ClientState.Get(): Types.Snapshot?
+	return snapshot
+end
+
+-- Calls the listener now (if a snapshot exists) and on every change.
+function ClientState.OnChanged(listener: Listener)
+	table.insert(listeners, listener)
+	local current = snapshot
+	if current ~= nil then
+		task.spawn(listener, current)
+	end
+end
+
+function ClientState.Start()
+	Remotes.Get("StateSync").OnClientEvent:Connect(function(payload: unknown)
+		if typeof(payload) ~= "table" then
+			return
+		end
+		local next = payload :: Types.Snapshot
+		snapshot = next
+		for _, listener in listeners do
+			task.spawn(listener, next)
+		end
+	end)
+end
+
+return ClientState
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX36">
+			<Properties>
+				<string name="Name">Feedback</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- "Juice": toasts, +gem popups, the hatch reveal card, server-wide banners
+-- and camera shake on rare results. All of it is cosmetic and client-side.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = Shared:WaitForChild("Config")
+local Types = require(Shared:WaitForChild("Types"))
+local Format = require(Shared:WaitForChild("Format"))
+local Remotes = require(Shared:WaitForChild("Remotes"))
+local Rarities = require(Config:WaitForChild("Rarities"))
+
+local Client = script.Parent
+local UiKit = require(Client:WaitForChild("UiKit"))
+local UIRoot = require(Client:WaitForChild("UIRoot"))
+
+local Feedback = {}
+
+local NOTICE_COLORS: { [string]: Color3 } = {
+	Info = Color3.fromRGB(70, 90, 140),
+	Success = Color3.fromRGB(50, 150, 75),
+	Error = Color3.fromRGB(170, 55, 55),
+}
+local MAX_TOASTS = 3
+local SHAKE_BIND = "HatchShake"
+
+local shakeUntil = 0
+local shakeStrength = 0
+
+-- Camera shake that decays over `duration`; stronger calls override weaker ones.
+function Feedback.Shake(strength: number, duration: number)
+	local now = os.clock()
+	if now < shakeUntil and strength < shakeStrength then
+		return
+	end
+	shakeStrength = strength
+	shakeUntil = now + duration
+	local startedAt = now
+	RunService:UnbindFromRenderStep(SHAKE_BIND)
+	RunService:BindToRenderStep(SHAKE_BIND, Enum.RenderPriority.Camera.Value + 1, function()
+		local camera = Workspace.CurrentCamera
+		local t = os.clock()
+		if camera == nil or t >= shakeUntil then
+			RunService:UnbindFromRenderStep(SHAKE_BIND)
+			shakeStrength = 0
+			return
+		end
+		local fade = 1 - (t - startedAt) / duration
+		local magnitude = shakeStrength * fade
+		local offset = Vector3.new(
+			(math.noise(t * 25, 0, 0)) * magnitude,
+			(math.noise(0, t * 25, 0)) * magnitude,
+			0
+		)
+		camera.CFrame = camera.CFrame * CFrame.new(offset)
+	end)
+end
+
+local function fadeOutAndDestroy(frame: GuiObject, delaySeconds: number)
+	task.delay(delaySeconds, function()
+		local tween = TweenService:Create(frame, TweenInfo.new(0.3), { BackgroundTransparency = 1 })
+		for _, descendant in frame:GetDescendants() do
+			if descendant:IsA("TextLabel") then
+				TweenService:Create(descendant, TweenInfo.new(0.3), { TextTransparency = 1, TextStrokeTransparency = 1 })
+					:Play()
+			elseif descendant:IsA("UIStroke") then
+				TweenService:Create(descendant, TweenInfo.new(0.3), { Transparency = 1 }):Play()
+			end
+		end
+		tween:Play()
+		tween.Completed:Wait()
+		frame:Destroy()
+	end)
+end
+
+function Feedback.Start(gui: ScreenGui, gemsLabel: TextLabel)
+	-- Toasts (personal notices).
+	local toastArea = Instance.new("Frame")
+	toastArea.Name = "Toasts"
+	toastArea.AnchorPoint = Vector2.new(0.5, 0)
+	toastArea.Position = UDim2.fromScale(0.5, 0.3)
+	toastArea.Size = UDim2.fromOffset(600, 220)
+	toastArea.BackgroundTransparency = 1
+	toastArea.Parent = gui
+	UIRoot.Scale(toastArea)
+	local toastLayout = Instance.new("UIListLayout")
+	toastLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	toastLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	toastLayout.Padding = UDim.new(0, 8)
+	toastLayout.Parent = toastArea
+	local toastCounter = 0
+
+	Remotes.Get("Notify").OnClientEvent:Connect(function(payload: unknown)
+		if typeof(payload) ~= "table" then
+			return
+		end
+		local notice = payload :: Types.Notice
+		toastCounter += 1
+		local toast = UiKit.Frame({
+			Name = "Toast",
+			Size = UDim2.fromOffset(580, 60),
+			Color = NOTICE_COLORS[notice.Kind] or NOTICE_COLORS.Info,
+			Parent = toastArea,
+		})
+		toast.LayoutOrder = toastCounter
+		UiKit.Label({
+			Name = "Text",
+			Text = tostring(notice.Text),
+			Size = UDim2.new(1, -20, 1, -10),
+			Position = UDim2.fromScale(0.5, 0.5),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			MaxTextSize = 28,
+			Parent = toast,
+		})
+		UiKit.Punch(toast, 0.8)
+		local toasts: { Frame } = {}
+		for _, child in toastArea:GetChildren() do
+			if child.Name == "Toast" and child:IsA("Frame") then
+				table.insert(toasts, child)
+			end
+		end
+		table.sort(toasts, function(a, b)
+			return a.LayoutOrder < b.LayoutOrder
+		end)
+		for i = 1, #toasts - MAX_TOASTS do
+			toasts[i]:Destroy()
+		end
+		fadeOutAndDestroy(toast, 2.5)
+	end)
+
+	-- "+123 💎" popups when collecting the gem pile.
+	Remotes.Get("Collected").OnClientEvent:Connect(function(payload: unknown)
+		if typeof(payload) ~= "table" then
+			return
+		end
+		local collected = payload :: Types.Collected
+		local holder = Instance.new("Frame")
+		holder.Name = "GemPopup"
+		holder.AnchorPoint = Vector2.new(0.5, 1)
+		holder.Position = UDim2.fromScale(0.5, 0.78)
+		holder.Size = UDim2.fromOffset(360, 80)
+		holder.BackgroundTransparency = 1
+		holder.Parent = gui
+		UIRoot.Scale(holder)
+		local label = UiKit.Label({
+			Name = "Text",
+			Text = `+{Format.Number(collected.Amount)} 💎`,
+			Size = UDim2.fromScale(1, 1),
+			TextColor = Color3.fromRGB(120, 230, 255),
+			MaxTextSize = 64,
+			Parent = holder,
+		})
+		UiKit.Punch(holder, 1.4)
+		UiKit.Punch(gemsLabel, 1.15)
+		local rise = TweenService:Create(
+			holder,
+			TweenInfo.new(0.9, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ Position = UDim2.fromScale(0.5, 0.6) }
+		)
+		TweenService:Create(label, TweenInfo.new(0.9), { TextTransparency = 1, TextStrokeTransparency = 1 }):Play()
+		rise:Play()
+		rise.Completed:Connect(function()
+			holder:Destroy()
+		end)
+	end)
+
+	-- Hatch reveal card.
+	local reveal = UiKit.Frame({
+		Name = "HatchReveal",
+		Size = UDim2.fromOffset(600, 280),
+		Position = UDim2.fromScale(0.5, 0.48),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = gui,
+	})
+	reveal.Visible = false
+	reveal.ZIndex = 10
+	UiKit.Stroke(reveal, 5, UiKit.Colors.Stroke)
+	UIRoot.Scale(reveal)
+	local revealHeader = UiKit.Label({
+		Name = "Header",
+		Text = "",
+		Size = UDim2.new(1, -24, 0, 40),
+		Position = UDim2.fromOffset(12, 14),
+		TextColor = UiKit.Colors.Muted,
+		MaxTextSize = 30,
+		Parent = reveal,
+	})
+	local revealName = UiKit.Label({
+		Name = "Name",
+		Text = "",
+		Size = UDim2.new(1, -24, 0, 90),
+		Position = UDim2.fromOffset(12, 60),
+		MaxTextSize = 72,
+		Parent = reveal,
+	})
+	local revealDetail = UiKit.Label({
+		Name = "Detail",
+		Text = "",
+		Size = UDim2.new(1, -24, 0, 70),
+		Position = UDim2.fromOffset(12, 160),
+		TextColor = UiKit.Colors.Text,
+		MaxTextSize = 30,
+		Parent = reveal,
+	})
+	local revealToken = 0
+
+	Remotes.Get("HatchResult").OnClientEvent:Connect(function(payload: unknown)
+		if typeof(payload) ~= "table" then
+			return
+		end
+		local result = payload :: Types.HatchResult
+		local rarity = Rarities.Defs[result.Rarity]
+		local color = if rarity ~= nil then rarity.Color else UiKit.Colors.Text
+		local order = if rarity ~= nil then rarity.Order else 1
+
+		revealHeader.Text = if result.Source == "Wild" then "🌋 WILD EGG HATCHED!" else "🥚 YOUR EGG HATCHED!"
+		revealName.Text = string.upper(result.DragonName)
+		revealName.TextColor3 = color
+		local lines = { rarity and rarity.DisplayName or result.Rarity }
+		if result.OneIn >= 50 then
+			table.insert(lines, `1 in {Format.Number(result.OneIn)}`)
+		end
+		if result.EmbersAwarded > 0 then
+			table.insert(lines, `+{result.EmbersAwarded} 🔥`)
+		end
+		revealDetail.Text = table.concat(lines, "  ·  ")
+		reveal.BackgroundColor3 = UiKit.Colors.Panel
+
+		reveal.Visible = true
+		UiKit.Punch(reveal, 0.3)
+		if order >= 4 or result.Mutation ~= "None" then
+			Feedback.Shake(0.15 * order, 0.35 + 0.1 * order)
+		end
+
+		revealToken += 1
+		local token = revealToken
+		task.delay(if order >= 4 then 3.5 else 2.2, function()
+			if token == revealToken then
+				reveal.Visible = false
+			end
+		end)
+	end)
+
+	-- Server-wide announcement banners, shown one at a time.
+	local queue: { Types.Announcement } = {}
+	local showing = false
+	local function showNext()
+		local nextAnnouncement = table.remove(queue, 1)
+		if nextAnnouncement == nil then
+			showing = false
+			return
+		end
+		showing = true
+		local big = nextAnnouncement.Big == true
+		local banner = UiKit.Frame({
+			Name = "Announcement",
+			Size = UDim2.fromOffset(if big then 1000 else 860, if big then 96 else 68),
+			Position = UDim2.fromScale(0.5, 0.24),
+			AnchorPoint = Vector2.new(0.5, 0),
+			Color = UiKit.Colors.Panel,
+			Transparency = 0.05,
+			Parent = gui,
+		})
+		banner.ZIndex = 8
+		UiKit.Stroke(banner, if big then 5 else 3, nextAnnouncement.Color)
+		UIRoot.Scale(banner)
+		UiKit.Label({
+			Name = "Text",
+			Text = tostring(nextAnnouncement.Text),
+			Size = UDim2.new(1, -24, 1, -12),
+			Position = UDim2.fromScale(0.5, 0.5),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			TextColor = nextAnnouncement.Color,
+			MaxTextSize = if big then 44 else 30,
+			Parent = banner,
+		})
+		UiKit.Punch(banner, if big then 1.3 else 1.1)
+		if big then
+			Feedback.Shake(0.25, 0.4)
+		end
+		local duration = if big then 5 else 3.5
+		fadeOutAndDestroy(banner, duration)
+		task.delay(duration + 0.35, showNext)
+	end
+
+	Remotes.Get("Announce").OnClientEvent:Connect(function(payload: unknown)
+		if typeof(payload) ~= "table" then
+			return
+		end
+		table.insert(queue, payload :: Types.Announcement)
+		if not showing then
+			showNext()
+		end
+	end)
+end
+
+return Feedback
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX37">
+			<Properties>
+				<string name="Name">Hud</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Always-visible HUD: currency counters with a rolling number tween, gem rate,
+-- the eruption countdown banner, and the two big bottom buttons.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Types = require(Shared:WaitForChild("Types"))
+local Format = require(Shared:WaitForChild("Format"))
+local Clock = require(Shared:WaitForChild("Clock"))
+
+local Client = script.Parent
+local UiKit = require(Client:WaitForChild("UiKit"))
+local UIRoot = require(Client:WaitForChild("UIRoot"))
+local ClientState = require(Client:WaitForChild("ClientState"))
+
+export type Callbacks = {
+	OnEggs: () -> (),
+	OnNest: () -> (),
+}
+
+export type HudHandle = {
+	GemsLabel: TextLabel,
+}
+
+local Hud = {}
+
+local ERUPTION_COLOR = Color3.fromRGB(255, 110, 30)
+local CALM_COLOR = Color3.fromRGB(70, 50, 60)
+
+local function rollingNumber(label: TextLabel, prefix: string): (number) -> ()
+	local value = Instance.new("NumberValue")
+	value.Value = 0
+	value.Changed:Connect(function(current: number)
+		label.Text = prefix .. Format.Number(math.floor(current))
+	end)
+	label.Text = prefix .. "0"
+	return function(target: number)
+		TweenService:Create(value, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Value = target })
+			:Play()
+	end
+end
+
+function Hud.Create(gui: ScreenGui, callbacks: Callbacks): HudHandle
+	-- Top stack: currencies, rate and eruption banner, scaled as one unit.
+	local top = Instance.new("Frame")
+	top.Name = "TopStack"
+	top.AnchorPoint = Vector2.new(0.5, 0)
+	top.Position = UDim2.new(0.5, 0, 0, 8)
+	top.Size = UDim2.fromOffset(560, 168)
+	top.BackgroundTransparency = 1
+	top.Parent = gui
+	UIRoot.Scale(top)
+
+	local bar = UiKit.Frame({
+		Name = "Currencies",
+		Size = UDim2.fromOffset(560, 100),
+		Color = UiKit.Colors.Panel,
+		Transparency = 0.1,
+		Parent = top,
+	})
+	UiKit.Stroke(bar, 3, UiKit.Colors.Stroke)
+
+	local gemsLabel = UiKit.Label({
+		Name = "Gems",
+		Text = "💎 0",
+		Size = UDim2.new(0.62, -12, 0, 60),
+		Position = UDim2.fromOffset(12, 6),
+		MaxTextSize = 44,
+		XAlignment = Enum.TextXAlignment.Left,
+		Parent = bar,
+	})
+	local embersLabel = UiKit.Label({
+		Name = "Embers",
+		Text = "🔥 0",
+		Size = UDim2.new(0.38, -12, 0, 60),
+		Position = UDim2.new(0.62, 0, 0, 6),
+		MaxTextSize = 40,
+		XAlignment = Enum.TextXAlignment.Right,
+		Parent = bar,
+	})
+	local rateLabel = UiKit.Label({
+		Name = "Rate",
+		Text = "+0 💎/s",
+		Size = UDim2.new(1, -24, 0, 28),
+		Position = UDim2.fromOffset(12, 66),
+		TextColor = UiKit.Colors.Muted,
+		MaxTextSize = 24,
+		XAlignment = Enum.TextXAlignment.Left,
+		Parent = bar,
+	})
+
+	local banner = UiKit.Frame({
+		Name = "EruptionBanner",
+		Size = UDim2.fromOffset(520, 52),
+		Position = UDim2.fromOffset(20, 112),
+		Color = CALM_COLOR,
+		Transparency = 0.1,
+		Parent = top,
+	})
+	local bannerLabel = UiKit.Label({
+		Name = "Text",
+		Text = "",
+		Size = UDim2.new(1, -20, 1, -8),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		MaxTextSize = 28,
+		Parent = banner,
+	})
+
+	local setGems = rollingNumber(gemsLabel, "💎 ")
+	local setEmbers = rollingNumber(embersLabel, "🔥 ")
+	ClientState.OnChanged(function(snapshot: Types.Snapshot)
+		setGems(snapshot.Gems)
+		setEmbers(snapshot.Embers)
+		rateLabel.Text = `+{Format.Number(snapshot.Rate)} 💎/s  ·  Nest Lv {snapshot.NestLevel}`
+	end)
+
+	task.spawn(function()
+		while gui.Parent ~= nil do
+			local now = Clock.Now()
+			if Workspace:GetAttribute("EruptionActive") == true then
+				local endsAt = Workspace:GetAttribute("EruptionEndsAt")
+				local left = if typeof(endsAt) == "number" then endsAt - now else 0
+				bannerLabel.Text = `🌋 ERUPTION! {Format.Duration(left)} — grab wild eggs!`
+				banner.BackgroundColor3 = ERUPTION_COLOR
+			else
+				local nextAt = Workspace:GetAttribute("NextEruptionAt")
+				if typeof(nextAt) == "number" and nextAt > 0 then
+					bannerLabel.Text = `🌋 Next eruption in {Format.Duration(nextAt - now)}`
+				else
+					bannerLabel.Text = "🌋 The volcano is rumbling..."
+				end
+				banner.BackgroundColor3 = CALM_COLOR
+			end
+			task.wait(0.25)
+		end
+	end)
+
+	-- Bottom buttons: large touch targets, scaled as one unit.
+	local bottom = Instance.new("Frame")
+	bottom.Name = "BottomBar"
+	bottom.AnchorPoint = Vector2.new(0.5, 1)
+	bottom.Position = UDim2.new(0.5, 0, 1, -12)
+	bottom.Size = UDim2.fromOffset(480, 104)
+	bottom.BackgroundTransparency = 1
+	bottom.Parent = gui
+	UIRoot.Scale(bottom)
+
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Horizontal
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.Padding = UDim.new(0, 24)
+	layout.Parent = bottom
+
+	UiKit.Button({
+		Name = "EggsButton",
+		Text = "🥚 EGGS",
+		Size = UDim2.fromOffset(228, 100),
+		Color = UiKit.Colors.Accent,
+		MaxTextSize = 40,
+		Parent = bottom,
+		OnClick = callbacks.OnEggs,
+	})
+	UiKit.Button({
+		Name = "NestButton",
+		Text = "🪺 NEST",
+		Size = UDim2.fromOffset(228, 100),
+		Color = UiKit.Colors.Good,
+		MaxTextSize = 40,
+		Parent = bottom,
+		OnClick = callbacks.OnNest,
+	})
+
+	return { GemsLabel = gemsLabel }
+end
+
+return Hud
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX38">
+			<Properties>
+				<string name="Name">NestPanel</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Nest panel: upgrade nest level and buy extra slots. Shows the before/after
+-- production multiplier so the value of each upgrade is obvious.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Types = require(Shared:WaitForChild("Types"))
+local Format = require(Shared:WaitForChild("Format"))
+local Formulas = require(Shared:WaitForChild("Formulas"))
+local Remotes = require(Shared:WaitForChild("Remotes"))
+
+local Client = script.Parent
+local UiKit = require(Client:WaitForChild("UiKit"))
+local UIRoot = require(Client:WaitForChild("UIRoot"))
+local ClientState = require(Client:WaitForChild("ClientState"))
+
+export type Panel = {
+	Open: () -> (),
+	Close: () -> (),
+	Toggle: () -> (),
+}
+
+local NestPanel = {}
+
+local function multiplierText(level: number): string
+	return "×" .. string.format("%.2f", Formulas.NestMultiplier(level))
+end
+
+local function row(parent: Instance, name: string, y: number): (TextLabel, TextLabel)
+	local title = UiKit.Label({
+		Name = name .. "Title",
+		Text = "",
+		Size = UDim2.new(0.58, -24, 0, 44),
+		Position = UDim2.fromOffset(24, y),
+		MaxTextSize = 34,
+		XAlignment = Enum.TextXAlignment.Left,
+		Parent = parent,
+	})
+	local detail = UiKit.Label({
+		Name = name .. "Detail",
+		Text = "",
+		Size = UDim2.new(0.58, -24, 0, 30),
+		Position = UDim2.fromOffset(24, y + 46),
+		TextColor = UiKit.Colors.Muted,
+		MaxTextSize = 24,
+		XAlignment = Enum.TextXAlignment.Left,
+		Parent = parent,
+	})
+	return title, detail
+end
+
+function NestPanel.Create(gui: ScreenGui): Panel
+	local upgradeRemote = Remotes.Get("UpgradeNest")
+	local slotRemote = Remotes.Get("BuySlot")
+
+	local panel = UiKit.Frame({
+		Name = "NestPanel",
+		Size = UDim2.fromOffset(720, 470),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = gui,
+	})
+	UiKit.Stroke(panel, 4, UiKit.Colors.Stroke)
+	panel.Visible = false
+	panel.ZIndex = 5
+	UIRoot.Scale(panel)
+
+	UiKit.Label({
+		Name = "Title",
+		Text = "🪺 Your Nest",
+		Size = UDim2.new(1, -120, 0, 64),
+		Position = UDim2.fromOffset(24, 12),
+		MaxTextSize = 48,
+		XAlignment = Enum.TextXAlignment.Left,
+		Parent = panel,
+	})
+
+	local levelTitle, levelDetail = row(panel, "Level", 96)
+	local upgradeButton = UiKit.Button({
+		Name = "Upgrade",
+		Text = "UPGRADE",
+		Size = UDim2.fromOffset(268, 84),
+		Position = UDim2.new(1, -24, 0, 92),
+		AnchorPoint = Vector2.new(1, 0),
+		Color = UiKit.Colors.Good,
+		Parent = panel,
+		OnClick = function()
+			upgradeRemote:FireServer()
+		end,
+	})
+
+	local slotTitle, slotDetail = row(panel, "Slots", 210)
+	local slotButton = UiKit.Button({
+		Name = "BuySlot",
+		Text = "BUY SLOT",
+		Size = UDim2.fromOffset(268, 84),
+		Position = UDim2.new(1, -24, 0, 206),
+		AnchorPoint = Vector2.new(1, 0),
+		Color = UiKit.Colors.Accent,
+		Parent = panel,
+		OnClick = function()
+			slotRemote:FireServer()
+		end,
+	})
+
+	local dragonsTitle, dragonsDetail = row(panel, "Dragons", 324)
+
+	ClientState.OnChanged(function(snapshot: Types.Snapshot)
+		levelTitle.Text = `Nest Level {snapshot.NestLevel}/{snapshot.NestMaxLevel}`
+		local nextCost = snapshot.NextNestCost
+		if nextCost ~= nil then
+			levelDetail.Text = `Production {multiplierText(snapshot.NestLevel)} → {multiplierText(snapshot.NestLevel + 1)}`
+			UiKit.SetButtonText(upgradeButton, `UPGRADE 💎 {Format.Number(nextCost)}`)
+			upgradeButton.BackgroundColor3 = if snapshot.Gems >= nextCost then UiKit.Colors.Good else UiKit.Colors.Disabled
+		else
+			levelDetail.Text = `Production {multiplierText(snapshot.NestLevel)} (max)`
+			UiKit.SetButtonText(upgradeButton, "MAX")
+			upgradeButton.BackgroundColor3 = UiKit.Colors.Disabled
+		end
+
+		slotTitle.Text = `Egg Slots {snapshot.NestSlots}`
+		local slotCost = snapshot.NextSlotCost
+		if slotCost ~= nil then
+			slotDetail.Text = `Hatch more eggs at once (gem max {snapshot.MaxGemSlots})`
+			UiKit.SetButtonText(slotButton, `+1 SLOT 💎 {Format.Number(slotCost)}`)
+			slotButton.BackgroundColor3 = if snapshot.Gems >= slotCost then UiKit.Colors.Accent else UiKit.Colors.Disabled
+		else
+			slotDetail.Text = "All gem slots unlocked"
+			UiKit.SetButtonText(slotButton, "MAX")
+			slotButton.BackgroundColor3 = UiKit.Colors.Disabled
+		end
+
+		dragonsTitle.Text = `Dragons {snapshot.DragonCount}/{snapshot.MaxDragons}`
+		dragonsDetail.Text = `Best {snapshot.Perches} produce +{Format.Number(snapshot.Rate)} 💎/s`
+	end)
+
+	local handle: Panel
+	handle = {
+		Open = function()
+			panel.Visible = true
+			UiKit.Punch(panel, 0.85)
+		end,
+		Close = function()
+			panel.Visible = false
+		end,
+		Toggle = function()
+			if panel.Visible then
+				handle.Close()
+			else
+				handle.Open()
+			end
+		end,
+	}
+
+	UiKit.Button({
+		Name = "Close",
+		Text = "✕",
+		Size = UDim2.fromOffset(76, 76),
+		Position = UDim2.new(1, -12, 0, 12),
+		AnchorPoint = Vector2.new(1, 0),
+		Color = UiKit.Colors.Bad,
+		MaxTextSize = 40,
+		Parent = panel,
+		OnClick = handle.Close,
+	})
+
+	return handle
+end
+
+return NestPanel
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX39">
+			<Properties>
+				<string name="Name">ShopPanel</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Egg shop. Every card shows price, hatch time and the exact drop odds
+-- before purchase. Buying only sends the egg id; the server decides.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Config = Shared:WaitForChild("Config")
+local Types = require(Shared:WaitForChild("Types"))
+local Format = require(Shared:WaitForChild("Format"))
+local Remotes = require(Shared:WaitForChild("Remotes"))
+local Eggs = require(Config:WaitForChild("Eggs"))
+local Rarities = require(Config:WaitForChild("Rarities"))
+
+local Client = script.Parent
+local UiKit = require(Client:WaitForChild("UiKit"))
+local UIRoot = require(Client:WaitForChild("UIRoot"))
+local ClientState = require(Client:WaitForChild("ClientState"))
+
+export type Panel = {
+	Open: () -> (),
+	Close: () -> (),
+	Toggle: () -> (),
+}
+
+type Card = {
+	Egg: Types.EggDef,
+	BuyButton: TextButton,
+	LockLabel: TextLabel,
+}
+
+local ShopPanel = {}
+
+local BUY_DEBOUNCE = 0.3
+
+local function currencySymbol(egg: Types.EggDef): string
+	return if egg.Currency == "Gems" then "💎" else "🔥"
+end
+
+local function buildCard(egg: Types.EggDef, order: number, parent: Instance, onBuy: (string) -> ()): Card
+	local card = UiKit.Frame({
+		Name = egg.Id,
+		Size = UDim2.fromOffset(270, 500),
+		Color = UiKit.Colors.PanelLight,
+		Parent = parent,
+	})
+	card.LayoutOrder = order
+
+	local swatch = UiKit.Frame({
+		Name = "Egg",
+		Size = UDim2.fromOffset(96, 120),
+		Position = UDim2.new(0.5, 0, 0, 14),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Color = egg.Color,
+		CornerRadius = 48,
+		Parent = card,
+	})
+	UiKit.Stroke(swatch, 3, UiKit.Colors.Stroke)
+
+	UiKit.Label({
+		Name = "Name",
+		Text = egg.DisplayName,
+		Size = UDim2.new(1, -16, 0, 36),
+		Position = UDim2.fromOffset(8, 140),
+		MaxTextSize = 30,
+		Parent = card,
+	})
+	UiKit.Label({
+		Name = "Price",
+		Text = `{currencySymbol(egg)} {Format.Number(egg.Price)}   ⏱ {Format.Duration(egg.HatchSeconds)}`,
+		Size = UDim2.new(1, -16, 0, 28),
+		Position = UDim2.fromOffset(8, 178),
+		TextColor = UiKit.Colors.Muted,
+		MaxTextSize = 24,
+		Parent = card,
+	})
+
+	-- Odds disclosure, shown before purchase.
+	local oddsTop = 214
+	local line = 0
+	for _, rarityId in Rarities.Order do
+		local odds = egg.Odds[rarityId]
+		local rarity = Rarities.Defs[rarityId]
+		if odds ~= nil and odds > 0 and rarity ~= nil then
+			UiKit.Label({
+				Name = `Odds_{rarityId}`,
+				Text = `{rarity.DisplayName}  {Format.Percent(odds)}`,
+				Size = UDim2.new(1, -32, 0, 24),
+				Position = UDim2.fromOffset(16, oddsTop + line * 27),
+				TextColor = rarity.Color,
+				MaxTextSize = 22,
+				XAlignment = Enum.TextXAlignment.Left,
+				Parent = card,
+			})
+			line += 1
+		end
+	end
+
+	local lastPress = 0
+	local buyButton = UiKit.Button({
+		Name = "Buy",
+		Text = "BUY",
+		Size = UDim2.new(1, -24, 0, 76),
+		Position = UDim2.new(0.5, 0, 1, -12),
+		AnchorPoint = Vector2.new(0.5, 1),
+		Color = UiKit.Colors.Good,
+		MaxTextSize = 36,
+		Parent = card,
+		OnClick = function()
+			local now = os.clock()
+			if now - lastPress < BUY_DEBOUNCE then
+				return
+			end
+			lastPress = now
+			onBuy(egg.Id)
+		end,
+	})
+
+	local lockLabel = UiKit.Label({
+		Name = "Lock",
+		Text = "",
+		Size = UDim2.new(1, -24, 0, 30),
+		Position = UDim2.new(0.5, 0, 1, -94),
+		AnchorPoint = Vector2.new(0.5, 1),
+		TextColor = UiKit.Colors.Bad,
+		MaxTextSize = 24,
+		Parent = card,
+	})
+
+	return { Egg = egg, BuyButton = buyButton, LockLabel = lockLabel }
+end
+
+local function refreshCard(card: Card, snapshot: Types.Snapshot)
+	local egg = card.Egg
+	local locked = snapshot.NestLevel < egg.UnlockNestLevel or snapshot.Rebirths < egg.UnlockRebirths
+	if locked then
+		card.LockLabel.Text = if snapshot.Rebirths < egg.UnlockRebirths
+			then `🔒 Rebirth {egg.UnlockRebirths}`
+			else `🔒 Nest Lv {egg.UnlockNestLevel}`
+		card.BuyButton.BackgroundColor3 = UiKit.Colors.Disabled
+		UiKit.SetButtonText(card.BuyButton, "LOCKED")
+		return
+	end
+	card.LockLabel.Text = ""
+	local balance = if egg.Currency == "Gems" then snapshot.Gems else snapshot.Embers
+	local affordable = balance >= egg.Price
+	card.BuyButton.BackgroundColor3 = if affordable then UiKit.Colors.Good else UiKit.Colors.Disabled
+	UiKit.SetButtonText(card.BuyButton, `BUY {currencySymbol(egg)} {Format.Number(egg.Price)}`)
+end
+
+function ShopPanel.Create(gui: ScreenGui): Panel
+	local buyRemote = Remotes.Get("BuyEgg")
+
+	local panel = UiKit.Frame({
+		Name = "ShopPanel",
+		Size = UDim2.fromOffset(940, 640),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Parent = gui,
+	})
+	UiKit.Stroke(panel, 4, UiKit.Colors.Stroke)
+	panel.Visible = false
+	panel.ZIndex = 5
+	UIRoot.Scale(panel)
+
+	UiKit.Label({
+		Name = "Title",
+		Text = "🥚 Egg Shop",
+		Size = UDim2.new(1, -120, 0, 64),
+		Position = UDim2.fromOffset(24, 12),
+		MaxTextSize = 48,
+		XAlignment = Enum.TextXAlignment.Left,
+		Parent = panel,
+	})
+
+	local list = Instance.new("ScrollingFrame")
+	list.Name = "Cards"
+	list.Size = UDim2.new(1, -32, 1, -100)
+	list.Position = UDim2.fromOffset(16, 88)
+	list.BackgroundTransparency = 1
+	list.BorderSizePixel = 0
+	list.ScrollingDirection = Enum.ScrollingDirection.X
+	list.AutomaticCanvasSize = Enum.AutomaticSize.X
+	list.CanvasSize = UDim2.new()
+	list.ScrollBarThickness = 10
+	list.Parent = panel
+
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Horizontal
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, 16)
+	layout.Parent = list
+
+	local cards: { Card } = {}
+	for order, eggId in Eggs.ShopOrder do
+		local egg = Eggs.Defs[eggId]
+		if egg ~= nil then
+			table.insert(cards, buildCard(egg, order, list, function(id: string)
+				buyRemote:FireServer(id)
+			end))
+		end
+	end
+
+	ClientState.OnChanged(function(snapshot: Types.Snapshot)
+		for _, card in cards do
+			refreshCard(card, snapshot)
+		end
+	end)
+
+	local handle: Panel
+	handle = {
+		Open = function()
+			panel.Visible = true
+			UiKit.Punch(panel, 0.85)
+		end,
+		Close = function()
+			panel.Visible = false
+		end,
+		Toggle = function()
+			if panel.Visible then
+				handle.Close()
+			else
+				handle.Open()
+			end
+		end,
+	}
+
+	UiKit.Button({
+		Name = "Close",
+		Text = "✕",
+		Size = UDim2.fromOffset(76, 76),
+		Position = UDim2.new(1, -12, 0, 12),
+		AnchorPoint = Vector2.new(1, 0),
+		Color = UiKit.Colors.Bad,
+		MaxTextSize = 40,
+		Parent = panel,
+		OnClick = handle.Close,
+	})
+
+	return handle
+end
+
+return ShopPanel
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX40">
+			<Properties>
+				<string name="Name">UIRoot</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Creates the single ScreenGui and keeps every top-level element scaled to the
+-- screen. Design size is 1280x720; on a phone the scale drops so the layout
+-- fits, but never below MIN_SCALE so touch targets stay large.
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+
+local UIRoot = {}
+
+local DESIGN_SIZE = Vector2.new(1280, 720)
+local MIN_SCALE = 0.55
+local MAX_SCALE = 1.6
+
+local scaled: { UIScale } = {}
+local currentScale = 1
+
+local function computeScale(): number
+	local camera = Workspace.CurrentCamera
+	if camera == nil then
+		return 1
+	end
+	local viewport = camera.ViewportSize
+	local ratio = math.min(viewport.X / DESIGN_SIZE.X, viewport.Y / DESIGN_SIZE.Y)
+	return math.clamp(ratio, MIN_SCALE, MAX_SCALE)
+end
+
+local function applyScale()
+	currentScale = computeScale()
+	for index = #scaled, 1, -1 do
+		local uiScale = scaled[index]
+		if uiScale.Parent == nil then
+			table.remove(scaled, index)
+		else
+			uiScale.Scale = currentScale
+			uiScale:SetAttribute("BaseScale", currentScale)
+		end
+	end
+end
+
+-- Adds a UIScale to a top-level element so it follows the screen size.
+-- UiKit.Punch reuses this UIScale (an element may only have one).
+function UIRoot.Scale(target: GuiObject)
+	local uiScale = Instance.new("UIScale")
+	uiScale.Name = "ScreenScale"
+	uiScale.Scale = currentScale
+	uiScale:SetAttribute("BaseScale", currentScale)
+	uiScale.Parent = target
+	table.insert(scaled, uiScale)
+	-- Popups and banners are short-lived; drop them from the list when destroyed.
+	uiScale.Destroying:Connect(function()
+		local index = table.find(scaled, uiScale)
+		if index ~= nil then
+			table.remove(scaled, index)
+		end
+	end)
+end
+
+function UIRoot.Create(): ScreenGui
+	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "HatchUI"
+	gui.ResetOnSpawn = false
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	gui.IgnoreGuiInset = false
+	gui.Parent = playerGui
+
+	local function watchCamera()
+		local camera = Workspace.CurrentCamera
+		if camera ~= nil then
+			camera:GetPropertyChangedSignal("ViewportSize"):Connect(applyScale)
+		end
+		applyScale()
+	end
+	Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(watchCamera)
+	watchCamera()
+	return gui
+end
+
+return UIRoot
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX41">
+			<Properties>
+				<string name="Name">UiKit</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Small UI construction kit: consistent colors, rounded panels, scaled text,
+-- and buttons with press feedback. Layout is designed at 1280x720 and scaled
+-- per element by UIRoot, so offsets here are "design pixels".
+
+local TweenService = game:GetService("TweenService")
+
+local UiKit = {}
+
+UiKit.Colors = {
+	Panel = Color3.fromRGB(34, 26, 40),
+	PanelLight = Color3.fromRGB(58, 44, 66),
+	Accent = Color3.fromRGB(255, 140, 40),
+	Good = Color3.fromRGB(70, 200, 95),
+	Bad = Color3.fromRGB(225, 70, 70),
+	Disabled = Color3.fromRGB(90, 90, 100),
+	Text = Color3.fromRGB(255, 255, 255),
+	Muted = Color3.fromRGB(200, 190, 210),
+	Stroke = Color3.fromRGB(20, 12, 24),
+}
+
+UiKit.Font = Enum.Font.FredokaOne
+
+export type FrameProps = {
+	Name: string,
+	Size: UDim2,
+	Position: UDim2?,
+	AnchorPoint: Vector2?,
+	Color: Color3?,
+	Transparency: number?,
+	CornerRadius: number?,
+	Parent: Instance,
+}
+
+export type LabelProps = {
+	Name: string,
+	Text: string,
+	Size: UDim2,
+	Position: UDim2?,
+	AnchorPoint: Vector2?,
+	TextColor: Color3?,
+	MaxTextSize: number?,
+	XAlignment: Enum.TextXAlignment?,
+	Parent: Instance,
+}
+
+export type ButtonProps = {
+	Name: string,
+	Text: string,
+	Size: UDim2,
+	Position: UDim2?,
+	AnchorPoint: Vector2?,
+	Color: Color3?,
+	MaxTextSize: number?,
+	Parent: Instance,
+	OnClick: () -> (),
+}
+
+function UiKit.Corner(parent: Instance, radius: number)
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, radius)
+	corner.Parent = parent
+end
+
+function UiKit.Stroke(parent: Instance, thickness: number, color: Color3)
+	local stroke = Instance.new("UIStroke")
+	stroke.Thickness = thickness
+	stroke.Color = color
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Parent = parent
+end
+
+function UiKit.Frame(props: FrameProps): Frame
+	local frame = Instance.new("Frame")
+	frame.Name = props.Name
+	frame.Size = props.Size
+	frame.Position = props.Position or UDim2.new()
+	frame.AnchorPoint = props.AnchorPoint or Vector2.zero
+	frame.BackgroundColor3 = props.Color or UiKit.Colors.Panel
+	frame.BackgroundTransparency = props.Transparency or 0
+	frame.BorderSizePixel = 0
+	UiKit.Corner(frame, props.CornerRadius or 16)
+	frame.Parent = props.Parent
+	return frame
+end
+
+function UiKit.Label(props: LabelProps): TextLabel
+	local label = Instance.new("TextLabel")
+	label.Name = props.Name
+	label.Text = props.Text
+	label.Size = props.Size
+	label.Position = props.Position or UDim2.new()
+	label.AnchorPoint = props.AnchorPoint or Vector2.zero
+	label.BackgroundTransparency = 1
+	label.Font = UiKit.Font
+	label.TextColor3 = props.TextColor or UiKit.Colors.Text
+	label.TextScaled = true
+	label.TextXAlignment = props.XAlignment or Enum.TextXAlignment.Center
+	label.TextStrokeTransparency = 0.4
+	label.TextStrokeColor3 = UiKit.Colors.Stroke
+	local constraint = Instance.new("UITextSizeConstraint")
+	constraint.MaxTextSize = props.MaxTextSize or 36
+	constraint.MinTextSize = 8
+	constraint.Parent = label
+	label.Parent = props.Parent
+	return label
+end
+
+-- Quick scale "punch" on any GuiObject. A GuiObject may only have one UIScale,
+-- so screen-scaled elements (UIRoot "ScreenScale") punch around their base scale.
+function UiKit.Punch(target: GuiObject, amount: number)
+	local uiScale: UIScale
+	local base = 1
+	local screenScale = target:FindFirstChild("ScreenScale")
+	if screenScale ~= nil and screenScale:IsA("UIScale") then
+		uiScale = screenScale
+		local stored = screenScale:GetAttribute("BaseScale")
+		base = if typeof(stored) == "number" then stored else screenScale.Scale
+	else
+		local existing = target:FindFirstChild("PunchScale")
+		if existing ~= nil and existing:IsA("UIScale") then
+			uiScale = existing
+		else
+			local created = Instance.new("UIScale")
+			created.Name = "PunchScale"
+			created.Parent = target
+			uiScale = created
+		end
+	end
+	uiScale.Scale = base * amount
+	TweenService:Create(uiScale, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = base })
+		:Play()
+end
+
+function UiKit.Button(props: ButtonProps): TextButton
+	local button = Instance.new("TextButton")
+	button.Name = props.Name
+	button.Text = ""
+	button.Size = props.Size
+	button.Position = props.Position or UDim2.new()
+	button.AnchorPoint = props.AnchorPoint or Vector2.zero
+	button.BackgroundColor3 = props.Color or UiKit.Colors.Accent
+	button.BorderSizePixel = 0
+	button.AutoButtonColor = true
+	UiKit.Corner(button, 14)
+	UiKit.Stroke(button, 3, UiKit.Colors.Stroke)
+
+	UiKit.Label({
+		Name = "Text",
+		Text = props.Text,
+		Size = UDim2.new(1, -16, 1, -12),
+		Position = UDim2.fromScale(0.5, 0.5),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		MaxTextSize = props.MaxTextSize or 34,
+		Parent = button,
+	})
+
+	button.Activated:Connect(function()
+		UiKit.Punch(button, 0.9)
+		props.OnClick()
+	end)
+	button.Parent = props.Parent
+	return button
+end
+
+function UiKit.SetButtonText(button: TextButton, text: string)
+	local label = button:FindFirstChild("Text")
+	if label ~= nil and label:IsA("TextLabel") then
+		label.Text = text
+	end
+end
+
+return UiKit
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX42">
+			<Properties>
+				<string name="Name">WorldFx</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- World-space labels and effects driven by server attributes: egg countdowns,
+-- the gem pile counter, rainbow dragons and the tap wobble on your own eggs.
+-- One low-frequency loop updates only what is tagged and streamed in.
+
+local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Format = require(Shared:WaitForChild("Format"))
+local Clock = require(Shared:WaitForChild("Clock"))
+
+local WorldFx = {}
+
+local UPDATE_INTERVAL = 0.2
+local READY_COLOR = Color3.fromRGB(120, 255, 140)
+local ERUPTION_COLOR = Color3.fromRGB(255, 150, 60)
+local WAITING_COLOR = Color3.new(1, 1, 1)
+
+local localPlayer = Players.LocalPlayer
+
+local function labelOf(part: Instance): TextLabel?
+	local gui = part:FindFirstChild("Label")
+	if gui == nil then
+		return nil
+	end
+	local text = gui:FindFirstChild("Text")
+	if text ~= nil and text:IsA("TextLabel") then
+		return text
+	end
+	return nil
+end
+
+local function numberAttribute(instance: Instance, name: string): number
+	local value = instance:GetAttribute(name)
+	return if typeof(value) == "number" then value else 0
+end
+
+local function updateEgg(part: Instance, now: number, erupting: boolean)
+	local label = labelOf(part)
+	if label == nil then
+		return
+	end
+	local name = part:GetAttribute("EggName")
+	local remaining = numberAttribute(part, "ReadyAt") - now
+	if remaining > 0 then
+		label.Text = `{if typeof(name) == "string" then name else "Egg"}\n⏱ {Format.Duration(remaining)}`
+		label.TextColor3 = WAITING_COLOR
+	elseif erupting then
+		label.Text = "🌋 HATCH NOW!\nEruption bonus!"
+		label.TextColor3 = ERUPTION_COLOR
+	else
+		label.Text = "TAP TO HATCH!"
+		label.TextColor3 = READY_COLOR
+	end
+end
+
+local function updatePile(part: Instance, now: number)
+	local label = labelOf(part)
+	if label == nil then
+		return
+	end
+	local pile = numberAttribute(part, "Pile")
+	local rate = numberAttribute(part, "Rate")
+	local cap = numberAttribute(part, "Cap")
+	local amount = pile + rate * math.max(0, now - numberAttribute(part, "PileAt"))
+	local full = rate > 0 and amount >= cap
+	if full then
+		amount = math.max(pile, cap)
+	end
+	if amount < 1 then
+		label.Text = if rate > 0 then "💎 filling..." else "💎 Hatch dragons\nto earn gems"
+	elseif full then
+		label.Text = `💎 {Format.Number(math.floor(amount))} FULL!\nTAP TO COLLECT`
+	else
+		label.Text = `💎 {Format.Number(math.floor(amount))}\nTAP TO COLLECT`
+	end
+end
+
+local function updateRainbow(model: Instance, now: number)
+	local color = Color3.fromHSV((now * 0.25) % 1, 0.8, 1)
+	for _, descendant in model:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			descendant.Color = color
+		end
+	end
+end
+
+local function isOwnPlot(instance: Instance): boolean
+	local current: Instance? = instance
+	while current ~= nil do
+		local owner = current:GetAttribute("OwnerUserId")
+		if owner ~= nil then
+			return owner == localPlayer.UserId
+		end
+		current = current.Parent
+	end
+	return false
+end
+
+-- Instant local wobble when you tap one of your own eggs; the server does the real work.
+local function hookSlot(slot: Instance)
+	local click = slot:FindFirstChildOfClass("ClickDetector")
+	if click == nil then
+		return
+	end
+	click.MouseClick:Connect(function()
+		if not isOwnPlot(slot) then
+			return
+		end
+		local egg = slot:FindFirstChild("Egg")
+		if egg == nil then
+			return
+		end
+		local mesh = egg:FindFirstChildOfClass("SpecialMesh")
+		if mesh == nil then
+			return
+		end
+		mesh.Scale = Vector3.new(1.25, 0.85, 1.25)
+		TweenService:Create(mesh, TweenInfo.new(0.25, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out), {
+			Scale = Vector3.one,
+		}):Play()
+	end)
+end
+
+function WorldFx.Start()
+	for _, slot in CollectionService:GetTagged("NestSlot") do
+		hookSlot(slot)
+	end
+	CollectionService:GetInstanceAddedSignal("NestSlot"):Connect(hookSlot)
+
+	task.spawn(function()
+		while true do
+			local now = Clock.Now()
+			local erupting = Workspace:GetAttribute("EruptionActive") == true
+			for _, part in CollectionService:GetTagged("IncubatingEgg") do
+				updateEgg(part, now, erupting)
+			end
+			for _, part in CollectionService:GetTagged("GemPile") do
+				updatePile(part, now)
+			end
+			for _, model in CollectionService:GetTagged("RainbowDragon") do
+				updateRainbow(model, now)
+			end
+			task.wait(UPDATE_INTERVAL)
+		end
+	end)
+end
+
+return WorldFx
+]]></ProtectedString>
+			</Properties>
+		</Item>
+	</Item>
+	<Item class="LocalScript" referent="RBX43">
+		<Properties>
+			<string name="Name">ClientMain</string>
+			<ProtectedString name="Source"><![CDATA[--!strict
+-- Client bootstrap: the only LocalScript. Builds the UI and starts the
+-- display-only client systems. All game decisions happen on the server.
+
+local Client = script.Parent:WaitForChild("Client")
+local ClientState = require(Client:WaitForChild("ClientState"))
+local UIRoot = require(Client:WaitForChild("UIRoot"))
+local Hud = require(Client:WaitForChild("Hud"))
+local ShopPanel = require(Client:WaitForChild("ShopPanel"))
+local NestPanel = require(Client:WaitForChild("NestPanel"))
+local Feedback = require(Client:WaitForChild("Feedback"))
+local WorldFx = require(Client:WaitForChild("WorldFx"))
+
+local gui = UIRoot.Create()
+local shop = ShopPanel.Create(gui)
+local nest = NestPanel.Create(gui)
+
+local hud = Hud.Create(gui, {
+	OnEggs = function()
+		nest.Close()
+		shop.Toggle()
+	end,
+	OnNest = function()
+		shop.Close()
+		nest.Toggle()
+	end,
+})
+
+Feedback.Start(gui, hud.GemsLabel)
+WorldFx.Start()
+
+-- Start listening last so the first snapshot reaches every UI listener.
+ClientState.Start()
+]]></ProtectedString>
+		</Properties>
+	</Item>
+</roblox>

@@ -1,0 +1,2287 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+	<Item class="Script" referent="RBX14">
+		<Properties>
+			<string name="Name">Main</string>
+			<ProtectedString name="Source"><![CDATA[--!strict
+-- Server bootstrap: validates config, builds the world, wires services, then
+-- starts accepting players. This is the only server Script; everything else
+-- is a ModuleScript under ServerScriptService.Services.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage.Shared
+local Types = require(Shared.Types)
+local Formulas = require(Shared.Formulas)
+local Economy = require(Shared.Config.Economy)
+
+local Services = script.Parent.Services
+local ConfigValidator = require(Services.ConfigValidator)
+local DataService = require(Services.DataService)
+local StateSync = require(Services.StateSync)
+local WorldService = require(Services.WorldService)
+local PlotService = require(Services.PlotService)
+local ProductionService = require(Services.ProductionService)
+local DragonService = require(Services.DragonService)
+local IncubationService = require(Services.IncubationService)
+local EruptionService = require(Services.EruptionService)
+local ShopService = require(Services.ShopService)
+local NestService = require(Services.NestService)
+
+ConfigValidator.Run()
+
+WorldService.Build()
+PlotService.Start()
+
+StateSync.SetBuilder(function(player: Player): Types.Snapshot?
+	local data = DataService.Get(player)
+	if data == nil then
+		return nil
+	end
+	return {
+		Gems = data.Gems,
+		Embers = data.Embers,
+		NestLevel = data.NestLevel,
+		NestMaxLevel = Economy.NestMaxLevel,
+		NextNestCost = Formulas.NestUpgradeCost(data.NestLevel),
+		NestSlots = data.NestSlots,
+		MaxGemSlots = Economy.StartingSlots + #Economy.SlotCosts,
+		NextSlotCost = Formulas.SlotCost(data.NestSlots),
+		Rate = ProductionService.GetRate(player),
+		DragonCount = DragonService.Count(data),
+		MaxDragons = Economy.MaxDragons,
+		Perches = Economy.Perches,
+		Rebirths = data.Rebirths,
+	}
+end)
+
+DataService.OnLoaded(function(player: Player, data: Types.PlayerData)
+	local plot = PlotService.Assign(player)
+	if plot == nil then
+		player:Kick("This server is full. Please join another server.")
+		return
+	end
+	PlotService.RenderSlots(plot, data.NestSlots)
+	ProductionService.OnLoaded(player, data)
+	if not data.Ftue.StarterGiven then
+		data.Ftue.StarterGiven = IncubationService.PlaceEgg(player, Economy.StarterEggId)
+	end
+	IncubationService.RenderAll(player)
+	DragonService.Refresh(player)
+	StateSync.MarkDirty(player)
+end)
+
+DataService.OnReleasing(function(player: Player, _data: Types.PlayerData)
+	ProductionService.Remove(player)
+	DragonService.ClearVisuals(player)
+	IncubationService.ClearVisuals(player)
+	PlotService.Release(player)
+end)
+
+ProductionService.Start()
+IncubationService.Start()
+ShopService.Start()
+NestService.Start()
+EruptionService.Start()
+
+-- Last, so every OnLoaded handler is registered before the first player loads.
+DataService.Start()
+]]></ProtectedString>
+		</Properties>
+	</Item>
+	<Item class="Folder" referent="RBX15">
+		<Properties>
+			<string name="Name">Services</string>
+		</Properties>
+		<Item class="ModuleScript" referent="RBX16">
+			<Properties>
+				<string name="Name">AnnounceService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Player notices (toasts) and server-wide announcement banners.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage.Shared
+local Types = require(Shared.Types)
+local Remotes = require(Shared.Remotes)
+local Format = require(Shared.Format)
+local Rarities = require(Shared.Config.Rarities)
+local Mutations = require(Shared.Config.Mutations)
+
+local AnnounceService = {}
+
+local announceRemote = Remotes.Get("Announce")
+local notifyRemote = Remotes.Get("Notify")
+
+function AnnounceService.Notify(player: Player, text: string, kind: Types.NoticeKind)
+	local notice: Types.Notice = { Text = text, Kind = kind }
+	notifyRemote:FireClient(player, notice)
+end
+
+function AnnounceService.Broadcast(text: string, color: Color3, big: boolean)
+	local announcement: Types.Announcement = { Text = text, Color = color, Big = big }
+	announceRemote:FireAllClients(announcement)
+end
+
+-- Rare hatches become server-wide moments.
+function AnnounceService.OnHatch(player: Player, result: Types.HatchResult)
+	local rarity = Rarities.Defs[result.Rarity]
+	if rarity == nil then
+		return
+	end
+	local mutation = Mutations.Defs[result.Mutation]
+	local mutationAnnounces = mutation ~= nil and mutation.AlwaysAnnounce
+	if rarity.Announce == "None" and not mutationAnnounces then
+		return
+	end
+	local big = rarity.Announce == "Global" or mutationAnnounces
+	local odds = if result.OneIn >= 2 then ` (1 in {Format.Number(result.OneIn)})` else ""
+	local article = if string.match(result.DragonName, "^[AEIOUaeiou]") then "an" else "a"
+	local text = `🌋 {player.DisplayName} hatched {article} {string.upper(result.DragonName)}!{odds}`
+	AnnounceService.Broadcast(text, rarity.Color, big)
+end
+
+return AnnounceService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX17">
+			<Properties>
+				<string name="Name">ConfigValidator</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Checks all content config at server start so a bad weekly data edit fails
+-- loudly in Studio instead of silently breaking drops in live servers.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = ReplicatedStorage.Shared.Config
+local Eggs = require(Config.Eggs)
+local Dragons = require(Config.Dragons)
+local Rarities = require(Config.Rarities)
+local Mutations = require(Config.Mutations)
+local Economy = require(Config.Economy)
+local Eruption = require(Config.Eruption)
+
+local ConfigValidator = {}
+
+local ODDS_TOLERANCE = 1e-6
+
+function ConfigValidator.Run()
+	local problems: { string } = {}
+	local function check(condition: boolean, message: string)
+		if not condition then
+			table.insert(problems, message)
+		end
+	end
+
+	for id, egg in Eggs.Defs do
+		check(egg.Id == id, `Egg {id}: Id field is "{egg.Id}"`)
+		check(egg.Price >= 0, `Egg {id}: negative price`)
+		check(not egg.Purchasable or egg.Price > 0, `Egg {id}: purchasable eggs need a price above 0`)
+		check(egg.HatchSeconds > 0, `Egg {id}: HatchSeconds must be above 0`)
+		check(egg.MaxTapReduction >= 0 and egg.MaxTapReduction <= 1, `Egg {id}: MaxTapReduction must be 0..1`)
+		check(egg.TierMultiplier > 0, `Egg {id}: TierMultiplier must be above 0`)
+		check(egg.Currency == "Gems" or egg.Currency == "Embers", `Egg {id}: unknown currency`)
+
+		local fixed = egg.Fixed
+		if fixed ~= nil then
+			check(Dragons.Defs[fixed.Species] ~= nil, `Egg {id}: fixed species {fixed.Species} does not exist`)
+			check(Mutations.Defs[fixed.Mutation] ~= nil, `Egg {id}: fixed mutation {fixed.Mutation} does not exist`)
+		else
+			local total = 0
+			for rarityId, odds in egg.Odds do
+				check(Rarities.Defs[rarityId] ~= nil, `Egg {id}: unknown rarity {rarityId}`)
+				check(odds >= 0, `Egg {id}: negative odds for {rarityId}`)
+				total += odds
+				if odds > 0 then
+					local species = egg.Species[rarityId]
+					local dragon = if species ~= nil then Dragons.Defs[species] else nil
+					check(dragon ~= nil, `Egg {id}: no dragon for rarity {rarityId}`)
+					if dragon ~= nil then
+						check(dragon.Rarity == rarityId, `Egg {id}: {dragon.Id} is {dragon.Rarity}, listed as {rarityId}`)
+						check(dragon.EggId == id, `Egg {id}: {dragon.Id} belongs to {dragon.EggId}`)
+					end
+				end
+			end
+			check(math.abs(total - 100) < ODDS_TOLERANCE, `Egg {id}: odds add up to {total}, expected 100`)
+		end
+	end
+
+	for _, eggId in Eggs.ShopOrder do
+		check(Eggs.Defs[eggId] ~= nil, `ShopOrder: egg {eggId} does not exist`)
+	end
+
+	for id, dragon in Dragons.Defs do
+		check(dragon.Id == id, `Dragon {id}: Id field is "{dragon.Id}"`)
+		check(Rarities.Defs[dragon.Rarity] ~= nil, `Dragon {id}: unknown rarity {dragon.Rarity}`)
+		check(Eggs.Defs[dragon.EggId] ~= nil, `Dragon {id}: unknown egg {dragon.EggId}`)
+	end
+
+	for _, rarityId in Rarities.Order do
+		check(Rarities.Defs[rarityId] ~= nil, `Rarities.Order: {rarityId} has no definition`)
+	end
+
+	for _, weights in { Mutations.NormalWeights, Mutations.EruptionWeights } do
+		local total = 0
+		for mutationId, weight in weights do
+			check(Mutations.Defs[mutationId] ~= nil, `Mutation weights: unknown mutation {mutationId}`)
+			check(table.find(Mutations.Order, mutationId) ~= nil, `Mutation weights: {mutationId} missing from Order`)
+			total += weight
+		end
+		check(total > 0, "Mutation weights: total must be above 0")
+	end
+
+	local previous = 0
+	for index, cost in Economy.SlotCosts do
+		check(cost > previous, `Economy.SlotCosts[{index}] must be higher than the previous slot`)
+		previous = cost
+	end
+	check(Eggs.Defs[Economy.StarterEggId] ~= nil, `Economy.StarterEggId {Economy.StarterEggId} does not exist`)
+	check(Eggs.Defs[Eruption.WildEggId] ~= nil, `Eruption.WildEggId {Eruption.WildEggId} does not exist`)
+	check(Eruption.EmbersMin <= Eruption.EmbersMax, "Eruption.EmbersMin must not exceed EmbersMax")
+
+	if #problems > 0 then
+		error(`[ConfigValidator] {#problems} problem(s):\n` .. table.concat(problems, "\n"))
+	end
+end
+
+return ConfigValidator
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX18">
+			<Properties>
+				<string name="Name">DataService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Milestone 1 version: player data lives in memory for the session only.
+-- The save-data milestone replaces this module with a ProfileStore-backed
+-- version that keeps exactly this public API (Get, OnLoaded, OnReleasing, Start).
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Types = require(ReplicatedStorage.Shared.Types)
+local DataTemplate = require(script.Parent.DataTemplate)
+
+type DataCallback = (Player, Types.PlayerData) -> ()
+
+local DataService = {}
+
+local dataByPlayer: { [Player]: Types.PlayerData } = {}
+local loadedCallbacks: { DataCallback } = {}
+local releasingCallbacks: { DataCallback } = {}
+
+local function runCallbacks(callbacks: { DataCallback }, player: Player, data: Types.PlayerData, label: string)
+	for _, callback in callbacks do
+		local ok, err = pcall(callback, player, data)
+		if not ok then
+			warn(`[DataService] {label} callback failed for {player.UserId}: {err}`)
+		end
+	end
+end
+
+local function load(player: Player)
+	if dataByPlayer[player] ~= nil then
+		return
+	end
+	local data = DataTemplate.New()
+	dataByPlayer[player] = data
+	runCallbacks(loadedCallbacks, player, data, "OnLoaded")
+end
+
+local function release(player: Player)
+	local data = dataByPlayer[player]
+	if data == nil then
+		return
+	end
+	runCallbacks(releasingCallbacks, player, data, "OnReleasing")
+	dataByPlayer[player] = nil
+end
+
+function DataService.Get(player: Player): Types.PlayerData?
+	return dataByPlayer[player]
+end
+
+-- Called (in registration order) once a player's data is ready.
+function DataService.OnLoaded(callback: DataCallback)
+	table.insert(loadedCallbacks, callback)
+end
+
+-- Called (in registration order) right before a player's data is released.
+function DataService.OnReleasing(callback: DataCallback)
+	table.insert(releasingCallbacks, callback)
+end
+
+function DataService.Start()
+	Players.PlayerAdded:Connect(load)
+	Players.PlayerRemoving:Connect(release)
+	for _, player in Players:GetPlayers() do
+		task.spawn(load, player)
+	end
+end
+
+return DataService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX19">
+			<Properties>
+				<string name="Name">DataTemplate</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Default data for a brand-new player. SchemaVersion is bumped whenever the
+-- shape changes; migrations are added together with the save-data milestone.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Types = require(ReplicatedStorage.Shared.Types)
+local Economy = require(ReplicatedStorage.Shared.Config.Economy)
+
+local DataTemplate = {}
+
+DataTemplate.SchemaVersion = 1
+
+function DataTemplate.New(): Types.PlayerData
+	return {
+		SchemaVersion = DataTemplate.SchemaVersion,
+		Gems = 0,
+		Embers = 0,
+		NestLevel = 1,
+		Rebirths = 0,
+		NestSlots = Economy.StartingSlots,
+		Incubating = {},
+		Dragons = {},
+		NextDragonId = 1,
+		PileGems = 0,
+		PileUpdatedAt = 0,
+		Stats = {
+			EggsHatched = 0,
+			GemsEarned = 0,
+			MythicsHatched = 0,
+			WildEggsClaimed = 0,
+		},
+		Ftue = {
+			StarterGiven = false,
+		},
+		PurchaseIds = {},
+	}
+end
+
+return DataTemplate
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX20">
+			<Properties>
+				<string name="Name">DragonService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Dragon inventory. The best dragons are auto-equipped on perches and set the
+-- player's production rate. Perch visuals are rebuilt only when they change.
+
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage.Shared
+local Types = require(Shared.Types)
+local Clock = require(Shared.Clock)
+local Formulas = require(Shared.Formulas)
+local Economy = require(Shared.Config.Economy)
+local Dragons = require(Shared.Config.Dragons)
+local Rarities = require(Shared.Config.Rarities)
+local Mutations = require(Shared.Config.Mutations)
+
+local Services = script.Parent
+local DataService = require(Services.DataService)
+local PlotService = require(Services.PlotService)
+local ProductionService = require(Services.ProductionService)
+local StateSync = require(Services.StateSync)
+local WorldService = require(Services.WorldService)
+
+type PerchVisual = {
+	Id: string,
+	Model: Model,
+}
+
+local DragonService = {}
+
+local visualsByPlayer: { [Player]: { [number]: PerchVisual } } = {}
+
+local function findTemplate(dragonId: string): Model?
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	if assets == nil then
+		return nil
+	end
+	local folder = assets:FindFirstChild("Dragons")
+	if folder == nil then
+		return nil
+	end
+	local template = folder:FindFirstChild(dragonId)
+	if template ~= nil and template:IsA("Model") then
+		return template
+	end
+	return nil
+end
+
+local function buildVisual(record: Types.DragonRecord): Model?
+	local def = Dragons.Defs[record.Species]
+	if def == nil then
+		return nil
+	end
+	local rarity = Rarities.Defs[def.Rarity]
+	local mutation = Mutations.Defs[record.Mutation]
+	local mutated = mutation ~= nil and record.Mutation ~= "None"
+
+	local model: Model
+	local template = findTemplate(def.Id)
+	if template ~= nil then
+		model = template:Clone()
+		for _, descendant in model:GetDescendants() do
+			if descendant:IsA("BasePart") then
+				descendant.Anchored = true
+				descendant.CanCollide = false
+				descendant.CastShadow = false
+			end
+		end
+	else
+		model = Instance.new("Model")
+		local body = Instance.new("Part")
+		body.Name = "Body"
+		body.Shape = Enum.PartType.Ball
+		body.Size = Vector3.new(3, 3, 3)
+		body.Anchored = true
+		body.CanCollide = false
+		body.CastShadow = false
+		body.Material = if mutated then Enum.Material.Neon else Enum.Material.SmoothPlastic
+		body.Color = if mutation ~= nil and mutation.Color ~= nil then mutation.Color else def.Color
+		body.Parent = model
+		model.PrimaryPart = body
+	end
+	model.Name = def.Id
+
+	local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart", true)
+	if primary ~= nil and primary:IsA("BasePart") then
+		local label = WorldService.MakeBillboard(primary, Vector2.new(7, 1.6), 3, 70)
+		local prefix = if mutated and mutation ~= nil then mutation.DisplayName .. " " else ""
+		label.Text = prefix .. def.DisplayName
+		label.TextColor3 = if rarity ~= nil then rarity.Color else Color3.new(1, 1, 1)
+	end
+
+	if record.Mutation == "Rainbow" then
+		CollectionService:AddTag(model, "RainbowDragon")
+	end
+	return model
+end
+
+function DragonService.Count(data: Types.PlayerData): number
+	local count = 0
+	for _ in data.Dragons do
+		count += 1
+	end
+	return count
+end
+
+function DragonService.IsFull(player: Player): boolean
+	local data = DataService.Get(player)
+	if data == nil then
+		return true
+	end
+	return DragonService.Count(data) >= Economy.MaxDragons
+end
+
+-- Ids of the highest-producing dragons (up to the perch count) and their rates.
+function DragonService.GetEquipped(data: Types.PlayerData): ({ string }, { number })
+	local entries: { { Id: string, Rate: number } } = {}
+	for id, record in data.Dragons do
+		table.insert(entries, { Id = id, Rate = Formulas.DragonRate(record.Species, record.Mutation) })
+	end
+	table.sort(entries, function(a, b)
+		if a.Rate ~= b.Rate then
+			return a.Rate > b.Rate
+		end
+		return a.Id < b.Id
+	end)
+	local ids: { string } = {}
+	local rates: { number } = {}
+	for i = 1, math.min(Economy.Perches, #entries) do
+		ids[i] = entries[i].Id
+		rates[i] = entries[i].Rate
+	end
+	return ids, rates
+end
+
+local function renderPerches(player: Player, data: Types.PlayerData, equipped: { string })
+	local plot = PlotService.Get(player)
+	if plot == nil then
+		return
+	end
+	local visuals = visualsByPlayer[player]
+	if visuals == nil then
+		visuals = {}
+		visualsByPlayer[player] = visuals
+	end
+	for index, perchCFrame in plot.PerchCFrames do
+		local wantedId = equipped[index]
+		local current = visuals[index]
+		if current ~= nil and current.Id ~= wantedId then
+			current.Model:Destroy()
+			visuals[index] = nil
+			current = nil
+		end
+		if current == nil and wantedId ~= nil then
+			local record = data.Dragons[wantedId]
+			local model = if record ~= nil then buildVisual(record) else nil
+			if model ~= nil then
+				model:PivotTo(perchCFrame * CFrame.new(0, 2, 0))
+				model.Parent = plot.Model
+				visuals[index] = { Id = wantedId, Model = model }
+			end
+		end
+	end
+end
+
+-- Re-equips the best dragons, updates the production rate and the perches.
+function DragonService.Refresh(player: Player)
+	local data = DataService.Get(player)
+	if data == nil then
+		return
+	end
+	local equipped, rates = DragonService.GetEquipped(data)
+	ProductionService.SetRate(player, Formulas.TotalRate(rates, data.NestLevel, data.Rebirths))
+	renderPerches(player, data, equipped)
+	StateSync.MarkDirty(player)
+end
+
+-- Adds a dragon and returns its id, or nil when storage is full.
+function DragonService.Add(player: Player, species: string, mutation: string): string?
+	local data = DataService.Get(player)
+	if data == nil or Dragons.Defs[species] == nil then
+		return nil
+	end
+	if DragonService.Count(data) >= Economy.MaxDragons then
+		return nil
+	end
+	local id = tostring(data.NextDragonId)
+	data.NextDragonId += 1
+	data.Dragons[id] = {
+		Species = species,
+		Mutation = mutation,
+		ObtainedAt = Clock.Now(),
+	}
+	DragonService.Refresh(player)
+	return id
+end
+
+function DragonService.ClearVisuals(player: Player)
+	local visuals = visualsByPlayer[player]
+	if visuals == nil then
+		return
+	end
+	for _, visual in visuals do
+		visual.Model:Destroy()
+	end
+	visualsByPlayer[player] = nil
+end
+
+return DragonService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX21">
+			<Properties>
+				<string name="Name">EconomyService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- The only place currency balances change. Every change is reported to
+-- transaction listeners (used by analytics and quests in later milestones).
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Types = require(ReplicatedStorage.Shared.Types)
+local DataService = require(script.Parent.DataService)
+local StateSync = require(script.Parent.StateSync)
+
+export type Flow = "Source" | "Sink"
+type Listener = (player: Player, currency: Types.Currency, amount: number, flow: Flow, reason: string, balance: number) -> ()
+
+local EconomyService = {}
+
+local listeners: { Listener } = {}
+
+local function isValidAmount(amount: number): boolean
+	return amount == amount and amount > 0 and amount < math.huge
+end
+
+local function notify(player: Player, currency: Types.Currency, amount: number, flow: Flow, reason: string, balance: number)
+	for _, listener in listeners do
+		task.spawn(listener, player, currency, amount, flow, reason, balance)
+	end
+end
+
+function EconomyService.OnTransaction(listener: Listener)
+	table.insert(listeners, listener)
+end
+
+function EconomyService.Get(player: Player, currency: Types.Currency): number
+	local data = DataService.Get(player)
+	if data == nil then
+		return 0
+	end
+	return if currency == "Gems" then data.Gems else data.Embers
+end
+
+function EconomyService.Add(player: Player, currency: Types.Currency, amount: number, reason: string): boolean
+	local data = DataService.Get(player)
+	if data == nil or not isValidAmount(amount) then
+		return false
+	end
+	local whole = math.floor(amount)
+	if whole <= 0 then
+		return false
+	end
+	local balance: number
+	if currency == "Gems" then
+		data.Gems += whole
+		data.Stats.GemsEarned += whole
+		balance = data.Gems
+	else
+		data.Embers += whole
+		balance = data.Embers
+	end
+	StateSync.MarkDirty(player)
+	notify(player, currency, whole, "Source", reason, balance)
+	return true
+end
+
+-- Returns false (and changes nothing) when the player cannot afford it.
+function EconomyService.Spend(player: Player, currency: Types.Currency, amount: number, reason: string): boolean
+	local data = DataService.Get(player)
+	if data == nil or not isValidAmount(amount) then
+		return false
+	end
+	local whole = math.floor(amount)
+	local balance: number
+	if currency == "Gems" then
+		if data.Gems < whole then
+			return false
+		end
+		data.Gems -= whole
+		balance = data.Gems
+	else
+		if data.Embers < whole then
+			return false
+		end
+		data.Embers -= whole
+		balance = data.Embers
+	end
+	StateSync.MarkDirty(player)
+	notify(player, currency, whole, "Sink", reason, balance)
+	return true
+end
+
+return EconomyService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX22">
+			<Properties>
+				<string name="Name">EruptionService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Server-wide eruption: on a schedule, wild eggs rain onto the lava field.
+-- Each player may grab a limited number; a grabbed egg hatches instantly with
+-- eruption mutation odds and awards Embers. Eggs in nests that hatch during an
+-- eruption also use eruption odds (see IncubationService).
+
+local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage.Shared
+local Types = require(Shared.Types)
+local Clock = require(Shared.Clock)
+local Format = require(Shared.Format)
+local Config = require(Shared.Config.Eruption)
+local Eggs = require(Shared.Config.Eggs)
+
+local Services = script.Parent
+local DataService = require(Services.DataService)
+local DragonService = require(Services.DragonService)
+local EconomyService = require(Services.EconomyService)
+local HatchService = require(Services.HatchService)
+local AnnounceService = require(Services.AnnounceService)
+local PlotService = require(Services.PlotService)
+local RateLimiter = require(Services.RateLimiter)
+local WorldService = require(Services.WorldService)
+
+local EruptionService = {}
+
+local ERUPTION_COLOR = Color3.fromRGB(255, 120, 40)
+
+local active = false
+local endsAt = 0
+local nextAt = 0
+local queued = 0
+local claims: { [Player]: number } = {}
+local wildEggs: { [BasePart]: boolean } = {}
+local rng = Random.new()
+local claimLimiter = RateLimiter.new(4, 2)
+
+local function publish()
+	Workspace:SetAttribute("EruptionActive", active)
+	Workspace:SetAttribute("EruptionEndsAt", endsAt)
+	Workspace:SetAttribute("NextEruptionAt", nextAt)
+end
+
+local function claim(player: Player, part: BasePart)
+	if not active or not wildEggs[part] then
+		return
+	end
+	if not claimLimiter:Allow(player) then
+		return
+	end
+	if (claims[player] or 0) >= Config.MaxClaimsPerPlayer then
+		AnnounceService.Notify(player, `You already grabbed {Config.MaxClaimsPerPlayer} wild eggs this eruption!`, "Info")
+		return
+	end
+	if not PlotService.IsNear(player, part.Position, Config.ClaimDistance) then
+		return
+	end
+	if DragonService.IsFull(player) then
+		AnnounceService.Notify(player, "Your dragon storage is full!", "Error")
+		return
+	end
+	local data = DataService.Get(player)
+	if data == nil then
+		return
+	end
+
+	-- Remove first so a second click in the same frame cannot claim it again.
+	wildEggs[part] = nil
+	part:Destroy()
+	claims[player] = (claims[player] or 0) + 1
+	data.Stats.WildEggsClaimed += 1
+
+	local embers = rng:NextInteger(Config.EmbersMin, Config.EmbersMax)
+	EconomyService.Add(player, "Embers", embers, "WildEgg")
+	HatchService.Hatch(player, Config.WildEggId, {
+		Eruption = true,
+		Source = "Wild",
+		EmbersAwarded = embers,
+	})
+end
+
+local function spawnWildEgg(egg: Types.EggDef)
+	local target = WorldService.RandomEruptionPoint(rng) + Vector3.new(0, 2, 0)
+	local part = Instance.new("Part")
+	part.Name = "WildEgg"
+	part.Size = Vector3.new(3, 4, 3)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CastShadow = false
+	part.Color = egg.Color
+	part.Material = Enum.Material.Neon
+	part.CFrame = CFrame.new(target + Vector3.new(0, 60, 0))
+	local mesh = Instance.new("SpecialMesh")
+	mesh.MeshType = Enum.MeshType.Sphere
+	mesh.Parent = part
+	local click = Instance.new("ClickDetector")
+	click.MaxActivationDistance = Config.ClaimDistance
+	click.Parent = part
+	click.MouseClick:Connect(function(player: Player)
+		claim(player, part)
+	end)
+	part.Parent = WorldService.GetWildEggContainer()
+	CollectionService:AddTag(part, "WildEgg")
+	wildEggs[part] = true
+
+	local fall = TweenService:Create(
+		part,
+		TweenInfo.new(1.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+		{ CFrame = CFrame.new(target) }
+	)
+	fall:Play()
+end
+
+local function beginEruption()
+	active = true
+	endsAt = Clock.Now() + Config.DurationSeconds
+	table.clear(claims)
+	publish()
+	WorldService.SetErupting(true)
+	AnnounceService.Broadcast(
+		`🌋 ERUPTION! Wild eggs are falling — grab up to {Config.MaxClaimsPerPlayer}!`,
+		ERUPTION_COLOR,
+		true
+	)
+
+	local egg = Eggs.Defs[Config.WildEggId]
+	if egg == nil then
+		return
+	end
+	local count = math.clamp(
+		math.ceil(#Players:GetPlayers() * Config.WildEggsPerPlayer),
+		Config.MinWildEggs,
+		Config.MaxWildEggs
+	)
+	for _ = 1, count do
+		if not active then
+			break
+		end
+		spawnWildEgg(egg)
+		task.wait(Config.SpawnIntervalSeconds)
+	end
+end
+
+local function finishEruption()
+	active = false
+	for part in wildEggs do
+		part:Destroy()
+	end
+	table.clear(wildEggs)
+	table.clear(claims)
+	WorldService.SetErupting(false)
+
+	local gap = Config.IntervalSeconds
+	if queued > 0 then
+		queued -= 1
+		gap = Config.QueuedGapSeconds
+	end
+	nextAt = Clock.Now() + gap
+	publish()
+	AnnounceService.Broadcast(`The volcano calms down. Next eruption in {Format.Duration(gap)}.`, ERUPTION_COLOR, false)
+end
+
+local function run()
+	nextAt = Clock.Now() + Config.FirstDelaySeconds
+	publish()
+	while true do
+		local waitFor = nextAt - Clock.Now()
+		if waitFor > 0 then
+			task.wait(math.min(waitFor, 1))
+		else
+			beginEruption()
+			local left = endsAt - Clock.Now()
+			if left > 0 then
+				task.wait(left)
+			end
+			finishEruption()
+		end
+	end
+end
+
+function EruptionService.IsActive(): boolean
+	return active
+end
+
+-- Starts an eruption now, or queues one right after the current eruption.
+-- Used by the paid "Trigger Eruption" product and admin tools.
+function EruptionService.TriggerNow()
+	if active then
+		queued += 1
+	else
+		nextAt = Clock.Now()
+		publish()
+	end
+end
+
+function EruptionService.Start()
+	Players.PlayerRemoving:Connect(function(player: Player)
+		claims[player] = nil
+	end)
+	task.spawn(run)
+end
+
+return EruptionService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX23">
+			<Properties>
+				<string name="Name">HatchRoller</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Server-only random rolls for hatches. Never runs on the client.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage.Shared
+local Types = require(Shared.Types)
+local Economy = require(Shared.Config.Economy)
+local Dragons = require(Shared.Config.Dragons)
+local Rarities = require(Shared.Config.Rarities)
+local Mutations = require(Shared.Config.Mutations)
+
+export type Roll = {
+	Species: string,
+	Rarity: string,
+	Mutation: string,
+}
+
+local HatchRoller = {}
+
+local rng = Random.new()
+
+-- Weighted pick that walks `order` so results are independent of table iteration order.
+local function pick(order: { string }, weights: { [string]: number }): string?
+	local total = 0
+	for _, id in order do
+		total += math.max(0, weights[id] or 0)
+	end
+	if total <= 0 then
+		return nil
+	end
+	local roll = rng:NextNumber() * total
+	local accumulated = 0
+	local last: string? = nil
+	for _, id in order do
+		local weight = math.max(0, weights[id] or 0)
+		if weight > 0 then
+			accumulated += weight
+			last = id
+			if roll < accumulated then
+				return id
+			end
+		end
+	end
+	return last
+end
+
+-- luck >= 1 multiplies the weight of Rare and better rarities.
+function HatchRoller.Roll(egg: Types.EggDef, eruption: boolean, luck: number): Roll?
+	local fixed = egg.Fixed
+	if fixed ~= nil then
+		local def = Dragons.Defs[fixed.Species]
+		if def == nil then
+			return nil
+		end
+		return { Species = fixed.Species, Rarity = def.Rarity, Mutation = fixed.Mutation }
+	end
+
+	local weights: { [string]: number } = {}
+	for _, rarityId in Rarities.Order do
+		local weight = egg.Odds[rarityId] or 0
+		local rarity = Rarities.Defs[rarityId]
+		if luck > 1 and rarity ~= nil and rarity.Order >= Economy.LuckMinRarityOrder then
+			weight *= luck
+		end
+		weights[rarityId] = weight
+	end
+
+	local rarityId = pick(Rarities.Order, weights)
+	if rarityId == nil then
+		return nil
+	end
+	local species = egg.Species[rarityId]
+	if species == nil then
+		return nil
+	end
+	local mutationWeights = if eruption then Mutations.EruptionWeights else Mutations.NormalWeights
+	local mutation = pick(Mutations.Order, mutationWeights) or "None"
+	return { Species = species, Rarity = rarityId, Mutation = mutation }
+end
+
+return HatchRoller
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX24">
+			<Properties>
+				<string name="Name">HatchService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Turns an egg into a dragon: roll, grant, tell the player, announce if rare.
+-- Never yields, so a hatch cannot be interleaved with another request.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage.Shared
+local Types = require(Shared.Types)
+local Remotes = require(Shared.Remotes)
+local Formulas = require(Shared.Formulas)
+local Eggs = require(Shared.Config.Eggs)
+local Dragons = require(Shared.Config.Dragons)
+local Mutations = require(Shared.Config.Mutations)
+
+local Services = script.Parent
+local DataService = require(Services.DataService)
+local DragonService = require(Services.DragonService)
+local HatchRoller = require(Services.HatchRoller)
+local AnnounceService = require(Services.AnnounceService)
+
+export type HatchContext = {
+	Eruption: boolean,
+	Source: string,
+	EmbersAwarded: number,
+}
+
+type Listener = (Player, Types.HatchResult) -> ()
+
+local HatchService = {}
+
+local hatchRemote = Remotes.Get("HatchResult")
+local listeners: { Listener } = {}
+
+function HatchService.OnHatched(listener: Listener)
+	table.insert(listeners, listener)
+end
+
+-- Returns false plus a reason ("StorageFull", "UnknownEgg", ...) when nothing was granted.
+function HatchService.Hatch(player: Player, eggId: string, context: HatchContext): (boolean, string?)
+	local data = DataService.Get(player)
+	if data == nil then
+		return false, "NoData"
+	end
+	local egg = Eggs.Defs[eggId]
+	if egg == nil then
+		return false, "UnknownEgg"
+	end
+	if DragonService.IsFull(player) then
+		return false, "StorageFull"
+	end
+	local roll = HatchRoller.Roll(egg, context.Eruption, 1)
+	if roll == nil then
+		return false, "RollFailed"
+	end
+	local dragonId = DragonService.Add(player, roll.Species, roll.Mutation)
+	if dragonId == nil then
+		return false, "StorageFull"
+	end
+
+	data.Stats.EggsHatched += 1
+	if roll.Rarity == "Mythic" then
+		data.Stats.MythicsHatched += 1
+	end
+
+	local def = Dragons.Defs[roll.Species]
+	local mutation = Mutations.Defs[roll.Mutation]
+	local prefix = if mutation ~= nil and mutation.DisplayName ~= "" then mutation.DisplayName .. " " else ""
+	local result: Types.HatchResult = {
+		Species = roll.Species,
+		DragonName = prefix .. (if def ~= nil then def.DisplayName else roll.Species),
+		Rarity = roll.Rarity,
+		Mutation = roll.Mutation,
+		Source = context.Source,
+		EmbersAwarded = context.EmbersAwarded,
+		OneIn = Formulas.OneIn(egg, roll.Rarity, roll.Mutation, context.Eruption),
+	}
+
+	hatchRemote:FireClient(player, result)
+	AnnounceService.OnHatch(player, result)
+	for _, listener in listeners do
+		task.spawn(listener, player, result)
+	end
+	return true, nil
+end
+
+return HatchService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX25">
+			<Properties>
+				<string name="Name">IncubationService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Eggs sitting in nest slots. Timers are timestamps (they keep running while
+-- the player is offline). Tapping an egg shaves time off; tapping a ready egg
+-- hatches it, using eruption odds if an eruption is active at that moment.
+
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage.Shared
+local Types = require(Shared.Types)
+local Clock = require(Shared.Clock)
+local Economy = require(Shared.Config.Economy)
+local Eggs = require(Shared.Config.Eggs)
+local World = require(Shared.Config.World)
+
+local Services = script.Parent
+local DataService = require(Services.DataService)
+local PlotService = require(Services.PlotService)
+local HatchService = require(Services.HatchService)
+local EruptionService = require(Services.EruptionService)
+local AnnounceService = require(Services.AnnounceService)
+local StateSync = require(Services.StateSync)
+local RateLimiter = require(Services.RateLimiter)
+local WorldService = require(Services.WorldService)
+
+local IncubationService = {}
+
+local tapLimiter = RateLimiter.new(10, 8)
+local eggVisuals: { [Player]: { [number]: BasePart } } = {}
+
+local function slotKey(index: number): string
+	return tostring(index)
+end
+
+local function readyAt(entry: Types.IncubatingEgg): number
+	return entry.StartedAt + entry.Duration - entry.Reduced
+end
+
+local function buildEggPart(egg: Types.EggDef, slotCFrame: CFrame, parent: Instance): BasePart
+	local part = Instance.new("Part")
+	part.Name = "Egg"
+	part.Size = Vector3.new(3, 4, 3)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CastShadow = false
+	part.Color = egg.Color
+	part.Material = Enum.Material.SmoothPlastic
+	part.CFrame = slotCFrame * CFrame.new(0, 2, 0)
+	local mesh = Instance.new("SpecialMesh")
+	mesh.MeshType = Enum.MeshType.Sphere
+	mesh.Parent = part
+	part:SetAttribute("EggId", egg.Id)
+	part:SetAttribute("EggName", egg.DisplayName)
+	WorldService.MakeBillboard(part, Vector2.new(6, 2), 3.5, 80)
+	part.Parent = parent
+	CollectionService:AddTag(part, "IncubatingEgg")
+	return part
+end
+
+local function renderSlot(player: Player, index: number)
+	local plot = PlotService.Get(player)
+	local data = DataService.Get(player)
+	if plot == nil or data == nil then
+		return
+	end
+	local visuals = eggVisuals[player]
+	if visuals == nil then
+		visuals = {}
+		eggVisuals[player] = visuals
+	end
+
+	local entry = data.Incubating[slotKey(index)]
+	local existing = visuals[index]
+	if entry == nil then
+		if existing ~= nil then
+			existing:Destroy()
+			visuals[index] = nil
+		end
+		return
+	end
+
+	local egg = Eggs.Defs[entry.EggId]
+	if egg == nil then
+		return
+	end
+	if existing ~= nil and existing:GetAttribute("EggId") ~= entry.EggId then
+		existing:Destroy()
+		existing = nil
+	end
+	local part = existing
+	if part == nil then
+		local slotModel = plot.SlotModels[index]
+		local slotCFrame = plot.SlotCFrames[index]
+		if slotModel == nil or slotCFrame == nil then
+			return
+		end
+		part = buildEggPart(egg, slotCFrame, slotModel)
+		visuals[index] = part
+	end
+	part:SetAttribute("ReadyAt", readyAt(entry))
+end
+
+local function firstFreeSlot(data: Types.PlayerData): number?
+	for index = 1, data.NestSlots do
+		if data.Incubating[slotKey(index)] == nil then
+			return index
+		end
+	end
+	return nil
+end
+
+function IncubationService.HasFreeSlot(player: Player): boolean
+	local data = DataService.Get(player)
+	return data ~= nil and firstFreeSlot(data) ~= nil
+end
+
+-- Puts an egg in the first free slot. Returns false if there is no free slot.
+function IncubationService.PlaceEgg(player: Player, eggId: string): boolean
+	local data = DataService.Get(player)
+	local egg = Eggs.Defs[eggId]
+	if data == nil or egg == nil then
+		return false
+	end
+	local index = firstFreeSlot(data)
+	if index == nil then
+		return false
+	end
+	data.Incubating[slotKey(index)] = {
+		EggId = eggId,
+		StartedAt = Clock.Now(),
+		Duration = egg.HatchSeconds,
+		Reduced = 0,
+	}
+	renderSlot(player, index)
+	StateSync.MarkDirty(player)
+	return true
+end
+
+function IncubationService.RenderAll(player: Player)
+	local plot = PlotService.Get(player)
+	if plot == nil then
+		return
+	end
+	for index = 1, #plot.SlotModels do
+		renderSlot(player, index)
+	end
+end
+
+function IncubationService.ClearVisuals(player: Player)
+	local visuals = eggVisuals[player]
+	if visuals == nil then
+		return
+	end
+	for _, part in visuals do
+		part:Destroy()
+	end
+	eggVisuals[player] = nil
+end
+
+local function onSlotClicked(player: Player, plot: PlotService.PlotInfo, index: number)
+	if not tapLimiter:Allow(player) then
+		return
+	end
+	local data = DataService.Get(player)
+	if data == nil then
+		return
+	end
+	local key = slotKey(index)
+	local entry = data.Incubating[key]
+	if entry == nil then
+		return
+	end
+	local slotCFrame = plot.SlotCFrames[index]
+	if slotCFrame == nil or not PlotService.IsNear(player, slotCFrame.Position, World.InteractDistance) then
+		return
+	end
+
+	local now = Clock.Now()
+	local remaining = readyAt(entry) - now
+	if remaining > 0 then
+		local egg = Eggs.Defs[entry.EggId]
+		if egg == nil then
+			return
+		end
+		local maxReduction = egg.MaxTapReduction * entry.Duration
+		local step = math.min(Economy.TapSeconds, maxReduction - entry.Reduced, remaining)
+		if step > 0 then
+			entry.Reduced += step
+			renderSlot(player, index)
+		end
+		return
+	end
+
+	local ok, reason = HatchService.Hatch(player, entry.EggId, {
+		Eruption = EruptionService.IsActive(),
+		Source = "Nest",
+		EmbersAwarded = 0,
+	})
+	if ok then
+		data.Incubating[key] = nil
+		renderSlot(player, index)
+		StateSync.MarkDirty(player)
+	elseif reason == "StorageFull" then
+		AnnounceService.Notify(player, "Your dragon storage is full!", "Error")
+	end
+end
+
+function IncubationService.Start()
+	PlotService.OnSlotClicked(onSlotClicked)
+end
+
+return IncubationService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX26">
+			<Properties>
+				<string name="Name">NestService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Nest level upgrades and extra nest slots, bought with gems.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage.Shared
+local Remotes = require(Shared.Remotes)
+local Format = require(Shared.Format)
+local Formulas = require(Shared.Formulas)
+
+local Services = script.Parent
+local DataService = require(Services.DataService)
+local EconomyService = require(Services.EconomyService)
+local DragonService = require(Services.DragonService)
+local IncubationService = require(Services.IncubationService)
+local PlotService = require(Services.PlotService)
+local AnnounceService = require(Services.AnnounceService)
+local RateLimiter = require(Services.RateLimiter)
+local Validate = require(Services.Validate)
+
+local NestService = {}
+
+local upgradeLimiter = RateLimiter.new(4, 2)
+local slotLimiter = RateLimiter.new(2, 1)
+
+local function onUpgrade(player: Player, ...: unknown)
+	if not Validate.NoArgs(...) or not upgradeLimiter:Allow(player) then
+		return
+	end
+	local data = DataService.Get(player)
+	if data == nil then
+		return
+	end
+	local cost = Formulas.NestUpgradeCost(data.NestLevel)
+	if cost == nil then
+		AnnounceService.Notify(player, "Your nest is already max level!", "Info")
+		return
+	end
+	if not EconomyService.Spend(player, "Gems", cost, "NestUpgrade") then
+		AnnounceService.Notify(player, `You need 💎 {Format.Number(cost)}.`, "Error")
+		return
+	end
+	data.NestLevel += 1
+	DragonService.Refresh(player)
+	AnnounceService.Notify(
+		player,
+		`Nest level {data.NestLevel}! Production ×{string.format("%.2f", Formulas.NestMultiplier(data.NestLevel))}`,
+		"Success"
+	)
+end
+
+local function onBuySlot(player: Player, ...: unknown)
+	if not Validate.NoArgs(...) or not slotLimiter:Allow(player) then
+		return
+	end
+	local data = DataService.Get(player)
+	if data == nil then
+		return
+	end
+	local cost = Formulas.SlotCost(data.NestSlots)
+	if cost == nil then
+		AnnounceService.Notify(player, "No more slots can be bought with gems.", "Info")
+		return
+	end
+	if not EconomyService.Spend(player, "Gems", cost, "NestSlot") then
+		AnnounceService.Notify(player, `You need 💎 {Format.Number(cost)}.`, "Error")
+		return
+	end
+	data.NestSlots += 1
+	local plot = PlotService.Get(player)
+	if plot ~= nil then
+		PlotService.RenderSlots(plot, data.NestSlots)
+	end
+	IncubationService.RenderAll(player)
+	AnnounceService.Notify(player, `New nest slot! You now have {data.NestSlots}.`, "Success")
+end
+
+function NestService.Start()
+	Remotes.Get("UpgradeNest").OnServerEvent:Connect(onUpgrade)
+	Remotes.Get("BuySlot").OnServerEvent:Connect(onBuySlot)
+end
+
+return NestService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX27">
+			<Properties>
+				<string name="Name">PlotService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Builds one plot (nest) per server slot, assigns plots to players, sends
+-- players home on spawn, and routes ClickDetector clicks to handlers.
+-- Clicks on someone else's plot are ignored here, before any handler runs.
+
+local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local World = require(ReplicatedStorage.Shared.Config.World)
+local WorldService = require(script.Parent.WorldService)
+
+export type PlotInfo = {
+	Index: number,
+	Model: Model,
+	SlotModels: { Model },
+	SlotPads: { BasePart },
+	SlotCFrames: { CFrame },
+	PerchCFrames: { CFrame },
+	Pile: BasePart,
+	SignLabel: TextLabel,
+	SpawnCFrame: CFrame,
+	Owner: Player?,
+}
+
+type SlotHandler = (Player, PlotInfo, number) -> ()
+type PileHandler = (Player, PlotInfo) -> ()
+
+local PlotService = {}
+
+local ACTIVE_SLOT = Color3.fromRGB(150, 95, 60)
+local LOCKED_SLOT = Color3.fromRGB(70, 70, 75)
+local FREE_SIGN_TEXT = "Free Nest"
+
+local plots: { PlotInfo } = {}
+local plotByPlayer: { [Player]: PlotInfo } = {}
+local slotHandlers: { SlotHandler } = {}
+local pileHandlers: { PileHandler } = {}
+
+local function dispatchSlot(player: Player, plot: PlotInfo, index: number)
+	if plot.Owner ~= player then
+		return
+	end
+	for _, handler in slotHandlers do
+		task.spawn(handler, player, plot, index)
+	end
+end
+
+local function dispatchPile(player: Player, plot: PlotInfo)
+	if plot.Owner ~= player then
+		return
+	end
+	for _, handler in pileHandlers do
+		task.spawn(handler, player, plot)
+	end
+end
+
+local function buildPlot(index: number, parent: Instance): PlotInfo
+	local anchor = WorldService.PlotAnchor(index)
+	local function at(offset: Vector3): CFrame
+		return anchor * CFrame.new(offset)
+	end
+
+	local model = Instance.new("Model")
+	model.Name = `Plot_{index}`
+	model.ModelStreamingMode = Enum.ModelStreamingMode.PersistentPerPlayer
+	model:SetAttribute("PlotIndex", index)
+	model:SetAttribute("OwnerUserId", 0)
+
+	local base = WorldService.MakePart({
+		Name = "Base",
+		Size = Vector3.new(World.PlotSize, 1, World.PlotSize),
+		CFrame = at(Vector3.new(0, 0.5, 0)),
+		Color = Color3.fromRGB(120, 165, 90),
+		Material = Enum.Material.Grass,
+		Parent = model,
+	})
+	model.PrimaryPart = base
+
+	-- Nest slots, laid out in a grid behind the perches.
+	local slotModels: { Model } = {}
+	local slotPads: { BasePart } = {}
+	local slotCFrames: { CFrame } = {}
+	local slotClicks: { ClickDetector } = {}
+	local slotTotal = World.SlotColumns * World.SlotRows
+	for i = 1, slotTotal do
+		local column = (i - 1) % World.SlotColumns
+		local row = math.floor((i - 1) / World.SlotColumns)
+		local x = (column - (World.SlotColumns - 1) / 2) * World.SlotSpacing
+		local z = World.SlotRowStartZ + row * World.SlotSpacing
+
+		local slotModel = Instance.new("Model")
+		slotModel.Name = `Slot_{i}`
+		slotModel:SetAttribute("SlotIndex", i)
+		local pad = WorldService.VerticalCylinder(
+			"Pad",
+			at(Vector3.new(x, 1.3, z)),
+			6,
+			0.6,
+			LOCKED_SLOT,
+			Enum.Material.Slate,
+			slotModel
+		)
+		pad.CastShadow = false
+		slotModel.PrimaryPart = pad
+
+		local click = Instance.new("ClickDetector")
+		click.MaxActivationDistance = World.InteractDistance
+		click.Parent = slotModel
+
+		slotModel.Parent = model
+		CollectionService:AddTag(slotModel, "NestSlot")
+
+		slotModels[i] = slotModel
+		slotPads[i] = pad
+		slotCFrames[i] = at(Vector3.new(x, 1.6, z))
+		slotClicks[i] = click
+	end
+
+	-- Perches where equipped dragons sit, facing the player's spawn point.
+	local perchCFrames: { CFrame } = {}
+	for i = 1, World.PerchCount do
+		local x = (i - (World.PerchCount + 1) / 2) * World.PerchSpacing
+		local perch = WorldService.VerticalCylinder(
+			`Perch_{i}`,
+			at(Vector3.new(x, 1.5, World.PerchRowZ)),
+			3,
+			1,
+			Color3.fromRGB(110, 85, 70),
+			Enum.Material.Wood,
+			model
+		)
+		perch.CastShadow = false
+		perchCFrames[i] = at(Vector3.new(x, 2, World.PerchRowZ))
+	end
+
+	local pile = WorldService.MakePart({
+		Name = "GemPile",
+		Size = Vector3.new(5, 2, 5),
+		CFrame = at(World.PileOffset),
+		Color = Color3.fromRGB(80, 220, 255),
+		Material = Enum.Material.Neon,
+		CastShadow = false,
+		Parent = model,
+	})
+	local pileClick = Instance.new("ClickDetector")
+	pileClick.MaxActivationDistance = World.InteractDistance
+	pileClick.Parent = pile
+	WorldService.MakeBillboard(pile, Vector2.new(8, 3), 3.5, 90)
+	pile:SetAttribute("Pile", 0)
+	pile:SetAttribute("PileAt", 0)
+	pile:SetAttribute("Rate", 0)
+	pile:SetAttribute("Cap", 0)
+	CollectionService:AddTag(pile, "GemPile")
+
+	local sign = WorldService.MakePart({
+		Name = "Sign",
+		Size = Vector3.new(18, 6, 1),
+		CFrame = at(World.SignOffset),
+		Color = Color3.fromRGB(90, 60, 40),
+		Material = Enum.Material.Wood,
+		Parent = model,
+	})
+	local surface = Instance.new("SurfaceGui")
+	surface.Face = Enum.NormalId.Front
+	surface.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	surface.PixelsPerStud = 40
+	surface.LightInfluence = 0
+	surface.Parent = sign
+	local signLabel = Instance.new("TextLabel")
+	signLabel.Size = UDim2.fromScale(1, 1)
+	signLabel.BackgroundTransparency = 1
+	signLabel.TextScaled = true
+	signLabel.Font = Enum.Font.FredokaOne
+	signLabel.TextColor3 = Color3.fromRGB(255, 235, 200)
+	signLabel.Text = FREE_SIGN_TEXT
+	signLabel.Parent = surface
+
+	local spawnPosition = at(World.SpawnOffset).Position
+	local lookTarget = at(Vector3.new(0, World.SpawnOffset.Y, 0)).Position
+
+	local info: PlotInfo = {
+		Index = index,
+		Model = model,
+		SlotModels = slotModels,
+		SlotPads = slotPads,
+		SlotCFrames = slotCFrames,
+		PerchCFrames = perchCFrames,
+		Pile = pile,
+		SignLabel = signLabel,
+		SpawnCFrame = CFrame.lookAt(spawnPosition, lookTarget),
+		Owner = nil,
+	}
+
+	for i, click in slotClicks do
+		click.MouseClick:Connect(function(player: Player)
+			dispatchSlot(player, info, i)
+		end)
+	end
+	pileClick.MouseClick:Connect(function(player: Player)
+		dispatchPile(player, info)
+	end)
+
+	model.Parent = parent
+	return info
+end
+
+local function sendHome(player: Player)
+	local plot = plotByPlayer[player]
+	local character = player.Character
+	if plot ~= nil and character ~= nil and character.Parent ~= nil then
+		character:PivotTo(plot.SpawnCFrame)
+	end
+end
+
+local function onCharacterAdded(player: Player, character: Model)
+	local root = character:WaitForChild("HumanoidRootPart", 10)
+	if root == nil then
+		return
+	end
+	-- Let the default spawn finish before moving the character.
+	task.wait()
+	sendHome(player)
+end
+
+local function watchCharacters(player: Player)
+	player.CharacterAdded:Connect(function(character: Model)
+		onCharacterAdded(player, character)
+	end)
+end
+
+function PlotService.Get(player: Player): PlotInfo?
+	return plotByPlayer[player]
+end
+
+function PlotService.OnSlotClicked(handler: SlotHandler)
+	table.insert(slotHandlers, handler)
+end
+
+function PlotService.OnPileClicked(handler: PileHandler)
+	table.insert(pileHandlers, handler)
+end
+
+-- Server-side distance check; ClickDetector limits alone are not trusted.
+function PlotService.IsNear(player: Player, position: Vector3, maxDistance: number): boolean
+	local character = player.Character
+	if character == nil then
+		return false
+	end
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if root == nil or not root:IsA("BasePart") then
+		return false
+	end
+	return (root.Position - position).Magnitude <= maxDistance
+end
+
+function PlotService.Assign(player: Player): PlotInfo?
+	local existing = plotByPlayer[player]
+	if existing ~= nil then
+		return existing
+	end
+	for _, plot in plots do
+		if plot.Owner == nil then
+			plot.Owner = player
+			plot.Model:SetAttribute("OwnerUserId", player.UserId)
+			plot.Model:AddPersistentPlayer(player)
+			plot.SignLabel.Text = `{player.DisplayName}'s Nest`
+			plotByPlayer[player] = plot
+			sendHome(player)
+			return plot
+		end
+	end
+	return nil
+end
+
+function PlotService.Release(player: Player)
+	local plot = plotByPlayer[player]
+	if plot == nil then
+		return
+	end
+	plotByPlayer[player] = nil
+	pcall(function()
+		plot.Model:RemovePersistentPlayer(player)
+	end)
+	plot.Owner = nil
+	plot.Model:SetAttribute("OwnerUserId", 0)
+	plot.SignLabel.Text = FREE_SIGN_TEXT
+	PlotService.RenderSlots(plot, 0)
+end
+
+-- Colors the first activeCount slot pads as usable and the rest as locked.
+function PlotService.RenderSlots(plot: PlotInfo, activeCount: number)
+	for i, pad in plot.SlotPads do
+		local active = i <= activeCount
+		pad.Color = if active then ACTIVE_SLOT else LOCKED_SLOT
+		pad.Transparency = if active then 0 else 0.4
+	end
+end
+
+function PlotService.Start()
+	local folder = Instance.new("Folder")
+	folder.Name = "Plots"
+	folder.Parent = Workspace
+	for index = 1, World.PlotCount do
+		plots[index] = buildPlot(index, folder)
+	end
+
+	Players.PlayerAdded:Connect(watchCharacters)
+	for _, player in Players:GetPlayers() do
+		watchCharacters(player)
+	end
+end
+
+return PlotService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX28">
+			<Properties>
+				<string name="Name">ProductionService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Gem production. Nothing runs per frame: the pile is settled from timestamps
+-- whenever the rate changes or the player collects, and clients animate the
+-- pile counter locally from the published attributes.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage.Shared
+local Types = require(Shared.Types)
+local Clock = require(Shared.Clock)
+local Remotes = require(Shared.Remotes)
+local Economy = require(Shared.Config.Economy)
+local World = require(Shared.Config.World)
+
+local Services = script.Parent
+local DataService = require(Services.DataService)
+local PlotService = require(Services.PlotService)
+local EconomyService = require(Services.EconomyService)
+local RateLimiter = require(Services.RateLimiter)
+
+local ProductionService = {}
+
+local collectedRemote = Remotes.Get("Collected")
+local collectLimiter = RateLimiter.new(6, 3)
+local rates: { [Player]: number } = {}
+
+-- Grows the pile up to the cap; a pile already above the cap (after a rate drop) is kept.
+local function settle(data: Types.PlayerData, rate: number, now: number)
+	local cap = rate * Economy.PileCapSeconds
+	local elapsed = math.max(0, now - data.PileUpdatedAt)
+	local grown = data.PileGems + rate * elapsed
+	if grown > cap then
+		grown = math.max(data.PileGems, cap)
+	end
+	data.PileGems = grown
+	data.PileUpdatedAt = now
+end
+
+local function publish(player: Player, data: Types.PlayerData)
+	local plot = PlotService.Get(player)
+	if plot == nil then
+		return
+	end
+	local rate = rates[player] or 0
+	plot.Pile:SetAttribute("Pile", data.PileGems)
+	plot.Pile:SetAttribute("PileAt", data.PileUpdatedAt)
+	plot.Pile:SetAttribute("Rate", rate)
+	plot.Pile:SetAttribute("Cap", rate * Economy.PileCapSeconds)
+end
+
+local function collect(player: Player, plot: PlotService.PlotInfo)
+	if not collectLimiter:Allow(player) then
+		return
+	end
+	if not PlotService.IsNear(player, plot.Pile.Position, World.InteractDistance) then
+		return
+	end
+	local data = DataService.Get(player)
+	if data == nil then
+		return
+	end
+	settle(data, rates[player] or 0, Clock.Now())
+	local amount = math.floor(data.PileGems)
+	if amount < 1 then
+		return
+	end
+	data.PileGems -= amount
+	EconomyService.Add(player, "Gems", amount, "Production")
+	publish(player, data)
+	local payload: Types.Collected = { Amount = amount }
+	collectedRemote:FireClient(player, payload)
+end
+
+function ProductionService.GetRate(player: Player): number
+	return rates[player] or 0
+end
+
+function ProductionService.SetRate(player: Player, rate: number)
+	local data = DataService.Get(player)
+	if data == nil then
+		return
+	end
+	settle(data, rates[player] or 0, Clock.Now())
+	rates[player] = rate
+	publish(player, data)
+end
+
+-- Session start: production does not accrue while offline (offline earnings
+-- are a separate, capped system in the retention milestone).
+function ProductionService.OnLoaded(player: Player, data: Types.PlayerData)
+	data.PileUpdatedAt = Clock.Now()
+	rates[player] = 0
+	publish(player, data)
+end
+
+function ProductionService.Remove(player: Player)
+	local data = DataService.Get(player)
+	if data ~= nil then
+		settle(data, rates[player] or 0, Clock.Now())
+	end
+	rates[player] = nil
+end
+
+function ProductionService.Start()
+	PlotService.OnPileClicked(collect)
+end
+
+return ProductionService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX29">
+			<Properties>
+				<string name="Name">RateLimiter</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Per-player token bucket. Each limiter allows bursts up to Capacity and
+-- refills at RefillPerSecond. Buckets are dropped when a player leaves.
+
+local Players = game:GetService("Players")
+
+type Bucket = {
+	Tokens: number,
+	UpdatedAt: number,
+}
+
+local RateLimiter = {}
+RateLimiter.__index = RateLimiter
+
+export type RateLimiter = typeof(setmetatable(
+	{} :: {
+		Capacity: number,
+		RefillPerSecond: number,
+		Buckets: { [Player]: Bucket },
+	},
+	RateLimiter
+))
+
+local allLimiters: { RateLimiter } = {}
+
+function RateLimiter.new(capacity: number, refillPerSecond: number): RateLimiter
+	local self = setmetatable({
+		Capacity = capacity,
+		RefillPerSecond = refillPerSecond,
+		Buckets = {},
+	}, RateLimiter)
+	table.insert(allLimiters, self)
+	return self
+end
+
+-- Consumes one token. Returns false when the player is over the limit.
+function RateLimiter.Allow(self: RateLimiter, player: Player): boolean
+	local now = os.clock()
+	local bucket = self.Buckets[player]
+	if bucket == nil then
+		bucket = { Tokens = self.Capacity, UpdatedAt = now }
+		self.Buckets[player] = bucket
+	end
+	local elapsed = now - bucket.UpdatedAt
+	bucket.Tokens = math.min(self.Capacity, bucket.Tokens + elapsed * self.RefillPerSecond)
+	bucket.UpdatedAt = now
+	if bucket.Tokens < 1 then
+		return false
+	end
+	bucket.Tokens -= 1
+	return true
+end
+
+Players.PlayerRemoving:Connect(function(player: Player)
+	for _, limiter in allLimiters do
+		limiter.Buckets[player] = nil
+	end
+end)
+
+return RateLimiter
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX30">
+			<Properties>
+				<string name="Name">ShopService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Egg shop. The client sends only the egg id; price, unlocks, free slot and
+-- balance are all checked here. The player is never charged without a slot.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Shared = ReplicatedStorage.Shared
+local Remotes = require(Shared.Remotes)
+local Format = require(Shared.Format)
+local Eggs = require(Shared.Config.Eggs)
+
+local Services = script.Parent
+local DataService = require(Services.DataService)
+local EconomyService = require(Services.EconomyService)
+local IncubationService = require(Services.IncubationService)
+local AnnounceService = require(Services.AnnounceService)
+local RateLimiter = require(Services.RateLimiter)
+local Validate = require(Services.Validate)
+
+local ShopService = {}
+
+local MAX_ID_LENGTH = 32
+local buyLimiter = RateLimiter.new(4, 2)
+
+local function onBuyEgg(player: Player, eggIdArg: unknown, ...: unknown)
+	if not Validate.NoArgs(...) then
+		return
+	end
+	if not buyLimiter:Allow(player) then
+		return
+	end
+	local eggId = Validate.Id(eggIdArg, MAX_ID_LENGTH)
+	if eggId == nil then
+		return
+	end
+	local egg = Eggs.Defs[eggId]
+	if egg == nil or not egg.Purchasable then
+		return
+	end
+	local data = DataService.Get(player)
+	if data == nil then
+		return
+	end
+
+	if data.NestLevel < egg.UnlockNestLevel then
+		AnnounceService.Notify(player, `Reach nest level {egg.UnlockNestLevel} to unlock the {egg.DisplayName}.`, "Error")
+		return
+	end
+	if data.Rebirths < egg.UnlockRebirths then
+		AnnounceService.Notify(player, `Rebirth {egg.UnlockRebirths} unlocks the {egg.DisplayName}.`, "Error")
+		return
+	end
+	if not IncubationService.HasFreeSlot(player) then
+		AnnounceService.Notify(player, "Your nest is full! Hatch an egg first.", "Error")
+		return
+	end
+	local symbol = if egg.Currency == "Gems" then "💎" else "🔥"
+	if not EconomyService.Spend(player, egg.Currency, egg.Price, `Egg:{eggId}`) then
+		AnnounceService.Notify(player, `You need {symbol} {Format.Number(egg.Price)}.`, "Error")
+		return
+	end
+	if not IncubationService.PlaceEgg(player, eggId) then
+		EconomyService.Add(player, egg.Currency, egg.Price, `Refund:{eggId}`)
+		return
+	end
+	AnnounceService.Notify(player, `{egg.DisplayName} placed in your nest!`, "Success")
+end
+
+function ShopService.Start()
+	Remotes.Get("BuyEgg").OnServerEvent:Connect(onBuyEgg)
+end
+
+return ShopService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX31">
+			<Properties>
+				<string name="Name">StateSync</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Sends the player's UI snapshot to their client. Changes in the same frame
+-- are coalesced into a single send.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Types = require(ReplicatedStorage.Shared.Types)
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+
+type Builder = (Player) -> Types.Snapshot?
+
+local StateSync = {}
+
+local remote = Remotes.Get("StateSync")
+local builder: Builder? = nil
+local pending: { [Player]: boolean } = {}
+
+-- The bootstrap provides the builder so this module has no service dependencies.
+function StateSync.SetBuilder(fn: Builder)
+	builder = fn
+end
+
+function StateSync.MarkDirty(player: Player)
+	if pending[player] then
+		return
+	end
+	pending[player] = true
+	task.defer(function()
+		pending[player] = nil
+		if player.Parent ~= Players then
+			return
+		end
+		local build = builder
+		if build == nil then
+			return
+		end
+		local snapshot = build(player)
+		if snapshot ~= nil then
+			remote:FireClient(player, snapshot)
+		end
+	end)
+end
+
+return StateSync
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX32">
+			<Properties>
+				<string name="Name">Validate</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Argument validation for RemoteEvent payloads. Every client value is
+-- untrusted: check type, length and range before using it.
+
+local Validate = {}
+
+-- Identifier made of letters, digits and underscores, e.g. an egg id.
+function Validate.Id(value: unknown, maxLength: number): string?
+	if typeof(value) ~= "string" then
+		return nil
+	end
+	local text = value :: string
+	if #text == 0 or #text > maxLength then
+		return nil
+	end
+	if string.match(text, "^[%w_]+$") == nil then
+		return nil
+	end
+	return text
+end
+
+-- Whole number within [min, max]. Rejects NaN, infinity and fractions.
+function Validate.Integer(value: unknown, min: number, max: number): number?
+	if typeof(value) ~= "number" then
+		return nil
+	end
+	local n = value :: number
+	if n ~= n or n % 1 ~= 0 or n < min or n > max then
+		return nil
+	end
+	return n
+end
+
+-- True when a remote fired with no extra arguments.
+function Validate.NoArgs(...: unknown): boolean
+	return select("#", ...) == 0
+end
+
+return Validate
+]]></ProtectedString>
+			</Properties>
+		</Item>
+		<Item class="ModuleScript" referent="RBX33">
+			<Properties>
+				<string name="Name">WorldService</string>
+				<ProtectedString name="Source"><![CDATA[--!strict
+-- Builds the shared world (ground, volcano, eruption field) from config at
+-- server start and exposes part/billboard helpers used by other services.
+-- Everything is anchored, low part count, and shadows are off on small parts.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local World = require(ReplicatedStorage.Shared.Config.World)
+
+export type PartProps = {
+	Name: string,
+	Size: Vector3,
+	CFrame: CFrame,
+	Color: Color3,
+	Material: Enum.Material?,
+	Shape: Enum.PartType?,
+	CanCollide: boolean?,
+	CastShadow: boolean?,
+	Transparency: number?,
+	Parent: Instance,
+}
+
+local WorldService = {}
+
+local LAVA_IDLE = Color3.fromRGB(200, 70, 20)
+local LAVA_ERUPTING = Color3.fromRGB(255, 160, 40)
+local ROCK = Color3.fromRGB(70, 56, 52)
+
+local wildEggContainer: Model? = nil
+local lavaTop: BasePart? = nil
+local volcanoFire: Fire? = nil
+
+function WorldService.MakePart(props: PartProps): Part
+	local part = Instance.new("Part")
+	part.Name = props.Name
+	part.Anchored = true
+	if props.Shape ~= nil then
+		part.Shape = props.Shape
+	end
+	part.Size = props.Size
+	part.CFrame = props.CFrame
+	part.Color = props.Color
+	part.Material = props.Material or Enum.Material.SmoothPlastic
+	part.CanCollide = if props.CanCollide == nil then true else props.CanCollide
+	part.CastShadow = if props.CastShadow == nil then true else props.CastShadow
+	part.Transparency = props.Transparency or 0
+	part.TopSurface = Enum.SurfaceType.Smooth
+	part.BottomSurface = Enum.SurfaceType.Smooth
+	part.Parent = props.Parent
+	return part
+end
+
+-- Upright cylinder (Roblox cylinders run along X, so this rotates it to stand on Y).
+function WorldService.VerticalCylinder(
+	name: string,
+	center: CFrame,
+	diameter: number,
+	height: number,
+	color: Color3,
+	material: Enum.Material,
+	parent: Instance
+): Part
+	return WorldService.MakePart({
+		Name = name,
+		Size = Vector3.new(height, diameter, diameter),
+		CFrame = center * CFrame.Angles(0, 0, math.rad(90)),
+		Color = color,
+		Material = material,
+		Shape = Enum.PartType.Cylinder,
+		Parent = parent,
+	})
+end
+
+-- BillboardGui named "Label" with a TextLabel named "Text". Clients update the text.
+function WorldService.MakeBillboard(adornee: BasePart, studs: Vector2, offsetY: number, maxDistance: number): TextLabel
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "Label"
+	gui.Size = UDim2.new(studs.X, 0, studs.Y, 0)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, offsetY, 0)
+	gui.MaxDistance = maxDistance
+	gui.LightInfluence = 0
+	gui.Adornee = adornee
+
+	local label = Instance.new("TextLabel")
+	label.Name = "Text"
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.TextScaled = true
+	label.Font = Enum.Font.FredokaOne
+	label.TextColor3 = Color3.new(1, 1, 1)
+	label.TextStrokeTransparency = 0.3
+	label.Text = ""
+	label.Parent = gui
+
+	gui.Parent = adornee
+	return label
+end
+
+function WorldService.PlotAnchor(index: number): CFrame
+	local angle = (index - 1) / World.PlotCount * math.pi * 2
+	local position = Vector3.new(math.cos(angle) * World.PlotRadius, 0, math.sin(angle) * World.PlotRadius)
+	return CFrame.lookAt(position, Vector3.zero)
+end
+
+-- Uniformly random point on the eruption ring, at ground height.
+function WorldService.RandomEruptionPoint(rng: Random): Vector3
+	local angle = rng:NextNumber() * math.pi * 2
+	local inner = World.EruptionRingInner ^ 2
+	local outer = World.EruptionRingOuter ^ 2
+	local radius = math.sqrt(inner + (outer - inner) * rng:NextNumber())
+	return Vector3.new(math.cos(angle) * radius, 0.2, math.sin(angle) * radius)
+end
+
+function WorldService.GetWildEggContainer(): Model
+	local container = wildEggContainer
+	assert(container ~= nil, "WorldService.Build must run first")
+	return container
+end
+
+function WorldService.SetErupting(erupting: boolean)
+	local top = lavaTop
+	if top ~= nil then
+		top.Color = if erupting then LAVA_ERUPTING else LAVA_IDLE
+	end
+	local fire = volcanoFire
+	if fire ~= nil then
+		fire.Enabled = erupting
+	end
+end
+
+function WorldService.Build()
+	local existing = Workspace:FindFirstChild("HatchWorld")
+	if existing ~= nil then
+		existing:Destroy()
+	end
+
+	local model = Instance.new("Model")
+	model.Name = "HatchWorld"
+	model.ModelStreamingMode = Enum.ModelStreamingMode.Persistent
+
+	WorldService.MakePart({
+		Name = "Ground",
+		Size = Vector3.new(World.GroundSize, 2, World.GroundSize),
+		CFrame = CFrame.new(0, -1, 0),
+		Color = Color3.fromRGB(96, 140, 70),
+		Material = Enum.Material.Grass,
+		Parent = model,
+	})
+
+	WorldService.VerticalCylinder(
+		"LavaField",
+		CFrame.new(0, 0.05, 0),
+		World.EruptionRingOuter * 2,
+		0.2,
+		Color3.fromRGB(60, 48, 44),
+		Enum.Material.Basalt,
+		model
+	)
+
+	-- Volcano: three stacked tiers, narrowing toward the top.
+	local tiers = {
+		{ Diameter = 1.0, Height = 0.45 },
+		{ Diameter = 0.75, Height = 0.3 },
+		{ Diameter = 0.5, Height = 0.25 },
+	}
+	local y = 0
+	for index, tier in tiers do
+		local height = World.VolcanoHeight * tier.Height
+		WorldService.VerticalCylinder(
+			`VolcanoTier{index}`,
+			CFrame.new(0, y + height / 2, 0),
+			World.VolcanoRadius * 2 * tier.Diameter,
+			height,
+			ROCK,
+			Enum.Material.Basalt,
+			model
+		)
+		y += height
+	end
+
+	local top = WorldService.VerticalCylinder(
+		"LavaTop",
+		CFrame.new(0, y + 0.3, 0),
+		World.VolcanoRadius * 0.8,
+		0.6,
+		LAVA_IDLE,
+		Enum.Material.Neon,
+		model
+	)
+	top.CastShadow = false
+	lavaTop = top
+
+	-- Upright, invisible holder so the fire points straight up.
+	local vent = WorldService.MakePart({
+		Name = "Vent",
+		Size = Vector3.new(2, 2, 2),
+		CFrame = CFrame.new(0, y + 1.5, 0),
+		Color = LAVA_IDLE,
+		CanCollide = false,
+		CastShadow = false,
+		Transparency = 1,
+		Parent = model,
+	})
+	local fire = Instance.new("Fire")
+	fire.Size = 25
+	fire.Heat = 25
+	fire.Enabled = false
+	fire.Parent = vent
+	volcanoFire = fire
+
+	local container = Instance.new("Model")
+	container.Name = "WildEggs"
+	container.ModelStreamingMode = Enum.ModelStreamingMode.Persistent
+	container.Parent = model
+	wildEggContainer = container
+
+	model.Parent = Workspace
+end
+
+return WorldService
+]]></ProtectedString>
+			</Properties>
+		</Item>
+	</Item>
+</roblox>
