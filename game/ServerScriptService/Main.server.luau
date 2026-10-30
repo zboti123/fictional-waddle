@@ -9,10 +9,12 @@ local Shared = ReplicatedStorage.Shared
 local Types = require(Shared.Types)
 local Formulas = require(Shared.Formulas)
 local Economy = require(Shared.Config.Economy)
+local Rarities = require(Shared.Config.Rarities)
 
 local Services = script.Parent.Services
 local ConfigValidator = require(Services.ConfigValidator)
 local DataService = require(Services.DataService)
+local HatchService = require(Services.HatchService)
 local StateSync = require(Services.StateSync)
 local WorldService = require(Services.WorldService)
 local PlotService = require(Services.PlotService)
@@ -71,6 +73,15 @@ DataService.OnReleasing(function(player: Player, _data: Types.PlayerData)
 	DragonService.ClearVisuals(player)
 	IncubationService.ClearVisuals(player)
 	PlotService.Release(player)
+end)
+
+-- Save right away after rare hatches so a crash can never cost a big moment.
+local SAVE_SOON_MIN_RARITY_ORDER = 5
+HatchService.OnHatched(function(player: Player, result: Types.HatchResult)
+	local rarity = Rarities.Defs[result.Rarity]
+	if (rarity ~= nil and rarity.Order >= SAVE_SOON_MIN_RARITY_ORDER) or result.Mutation == "Rainbow" then
+		DataService.SaveSoon(player)
+	end
 end)
 
 ProductionService.Start()

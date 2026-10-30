@@ -1,6 +1,7 @@
 --!strict
--- Default data for a brand-new player. SchemaVersion is bumped whenever the
--- shape changes; migrations are added together with the save-data milestone.
+-- Default data for a brand-new player. Bump SchemaVersion whenever the shape
+-- changes and add the matching step in Migrations. Only JSON-safe values
+-- (no Color3, Vector3, Instances) may be stored here.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
